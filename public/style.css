@@ -51,6 +51,7 @@ header { border-bottom: 1px solid var(--line); }
   cursor: pointer;
   border-bottom: 2px solid transparent;
   letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 #modes button:hover { color: var(--fg); }
 #modes button.on { color: var(--fg); border-bottom-color: var(--fg); }
