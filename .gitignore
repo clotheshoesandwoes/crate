@@ -1,0 +1,6 @@
+# local state — holds Spotify tokens + your library profile. NEVER commit.
+data/
+
+node_modules/
+*.log
+*.tmp

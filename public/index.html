@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>crate</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%23101012'/><rect x='3' y='3' width='10' height='10' fill='none' stroke='%23e6e6e6'/></svg>">
+</head>
+<body>
+
+<header>
+  <div class="mast">
+    <div class="brand">crate</div>
+    <nav id="modes">
+      <button data-mode="new" class="on">new</button>
+      <button data-mode="gems">old gems</button>
+      <button data-mode="deep">deep cuts</button>
+    </nav>
+    <div class="right">
+      <span id="acct"></span>
+      <button id="gear" class="quiet">settings</button>
+    </div>
+  </div>
+  <div class="bench">
+    <input id="seed" type="text" placeholder="dig from an artist… (blank = your taste)" spellcheck="false">
+    <button id="dig">dig</button>
+    <div class="dials">
+      <label>familiar <input id="farout" type="range" min="0" max="100" value="40"> far out</label>
+      <label>popular <input id="obscurity" type="range" min="0" max="100" value="55"> obscure</label>
+      <span id="yearwrap" hidden>
+        <label>released ≤
+          <select id="yearcap">
+            <option>1980</option><option>1990</option><option>1995</option>
+            <option>2000</option><option selected>2005</option><option>2010</option><option>2015</option>
+          </select>
+        </label>
+      </span>
+      <label class="drift">drift <input id="drift" type="checkbox" title="auto-play onward through the crate"></label>
+    </div>
+  </div>
+</header>
+
+<div id="status"></div>
+
+<section id="setup" hidden>
+  <div class="panel">
+    <h2>set up</h2>
+    <p>crate reads your Spotify library to learn your taste, then digs through open
+    music graphs — not Spotify's promo machine — for things you haven't heard.
+    Finds save back to your Liked Songs and a <em>Crate finds</em> playlist.</p>
+
+    <ol>
+      <li>open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noreferrer">developer.spotify.com/dashboard</a> and log in with your normal Spotify account</li>
+      <li>Create app — name it anything. Redirect URI: <code>http://127.0.0.1:8823/callback</code> — add it, tick <em>Web API</em>, save</li>
+      <li>copy the Client ID from the app's settings and paste it here</li>
+    </ol>
+
+    <div class="row"><label for="clientid">Spotify Client ID</label><input id="clientid" spellcheck="false"></div>
+    <div class="row"><label for="lastfmkey">Last.fm API key <span class="opt">(optional — second similarity graph)</span></label><input id="lastfmkey" spellcheck="false"></div>
+    <div class="row checks">
+      <label><input type="checkbox" id="optplaylist"> also add finds to a “Crate finds” playlist</label>
+      <label><input type="checkbox" id="opthover"> hover a cover to preview it</label>
+    </div>
+
+    <div class="row buttons">
+      <button id="savesetup">Save</button>
+      <button id="connect">Connect Spotify</button>
+      <button id="closesetup" class="quiet">Close</button>
+    </div>
+
+    <div class="row buttons secondary">
+      <button id="rescan" class="quiet">Rescan library</button>
+      <button id="fullrescan" class="quiet">Full rescan</button>
+      <button id="disconnect" class="quiet">Disconnect</button>
+    </div>
+
+    <p class="fine">No Spotify yet? Type an artist in the top bar and dig — previews come from
+    open sources and work without an account. Everything is stored in <code>data\store.json</code> on this machine.</p>
+  </div>
+</section>
+
+<main id="grid"></main>
+
+<footer id="nowbar" hidden>
+  <img id="nowart" alt="">
+  <div class="nowmeta">
+    <div id="nowtitle"></div>
+    <div id="nowsub"></div>
+  </div>
+  <div class="nowacts">
+    <button id="nowlove" title="save to spotify (L)">♥</button>
+    <button id="nowban" title="never again (X)">✕</button>
+    <button id="nowopen" class="quiet">open in spotify</button>
+  </div>
+  <div id="nowprog"></div>
+</footer>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "name": "crate",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Local music discovery that digs instead of pushing. Spotify library in, open similarity graphs out.",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node check.mjs"
+  }
+}

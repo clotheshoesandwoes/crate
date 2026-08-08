@@ -1,0 +1,601 @@
+// crate — client app: Spotify auth + library profile, dig UI, previews, save-back.
+import { dig, normKey, artistKey } from "./engine.js";
+
+const BASE = location.origin;
+const REDIRECT_URI = BASE + "/callback";
+const SCOPES = "user-library-read user-library-modify user-top-read playlist-modify-private";
+
+const $ = (sel) => document.querySelector(sel);
+// ?preview=1 — screenshot/test mode: dig freely but never scan, mark seen, or persist
+const PREVIEW = new URLSearchParams(location.search).has("preview");
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+};
+
+// ---------- state ----------
+let store = null;
+let trackKeySet = new Set();
+let isrcSet = new Set();
+let batch = [];
+let currentIdx = -1;
+let digging = false;
+let scanAbort = false;
+const audio = new Audio();
+audio.preload = "none";
+
+const api = {
+  dz: async (pathAndQuery) => {
+    const r = await fetch("/api/deezer/" + pathAndQuery);
+    const j = await r.json();
+    if (j && j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+    return j;
+  },
+  lastfm: null, // set after store loads if a key exists
+};
+
+async function loadStore() {
+  store = await (await fetch("/api/store")).json();
+  trackKeySet = new Set(store.profile.trackKeys || []);
+  isrcSet = new Set(store.profile.isrcs || []);
+  if (store.lastfm.apiKey) {
+    api.lastfm = async (params) => {
+      const r = await fetch("/api/lastfm?" + new URLSearchParams(params));
+      return r.json();
+    };
+  }
+}
+
+let saveTimer = null;
+function persist(now = false) {
+  clearTimeout(saveTimer);
+  const doSave = () => fetch("/api/store", { method: "POST", body: JSON.stringify(store) });
+  if (now) return doSave();
+  saveTimer = setTimeout(doSave, 800);
+}
+
+function status(msg) {
+  $("#status").textContent = msg || "";
+}
+
+// ---------- spotify auth (PKCE) ----------
+const b64url = (buf) =>
+  btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+async function login() {
+  if (!store.spotify.clientId) { openSettings(); return; }
+  const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
+  localStorage.setItem("pkce_verifier", verifier);
+  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+  location.href = "https://accounts.spotify.com/authorize?" + new URLSearchParams({
+    client_id: store.spotify.clientId,
+    response_type: "code",
+    redirect_uri: REDIRECT_URI,
+    scope: SCOPES,
+    code_challenge_method: "S256",
+    code_challenge: challenge,
+  });
+}
+
+async function tokenRequest(params) {
+  const r = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: store.spotify.clientId, ...params }),
+  });
+  if (!r.ok) throw new Error("token request failed: " + (await r.text()));
+  return r.json();
+}
+
+async function handleCallback() {
+  const code = new URLSearchParams(location.search).get("code");
+  if (!code) return false;
+  try {
+    const t = await tokenRequest({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: REDIRECT_URI,
+      code_verifier: localStorage.getItem("pkce_verifier") || "",
+    });
+    store.spotify.tokens = { at: t.access_token, rt: t.refresh_token, exp: Date.now() + t.expires_in * 1000 };
+    await persist(true);
+  } catch (e) {
+    status("spotify login failed — " + e.message);
+  }
+  history.replaceState({}, "", "/");
+  return true;
+}
+
+async function freshToken() {
+  const tok = store.spotify.tokens;
+  if (!tok) return null;
+  if (Date.now() < tok.exp - 60000) return tok.at;
+  try {
+    const t = await tokenRequest({ grant_type: "refresh_token", refresh_token: tok.rt });
+    store.spotify.tokens = {
+      at: t.access_token,
+      rt: t.refresh_token || tok.rt,
+      exp: Date.now() + t.expires_in * 1000,
+    };
+    persist();
+    return t.access_token;
+  } catch {
+    store.spotify.tokens = null;
+    persist();
+    return null;
+  }
+}
+
+async function sp(path, opts = {}, retried = false) {
+  const at = await freshToken();
+  if (!at) throw new Error("not connected to spotify");
+  const r = await fetch("https://api.spotify.com/v1" + path, {
+    ...opts,
+    headers: { Authorization: "Bearer " + at, ...(opts.body ? { "Content-Type": "application/json" } : {}), ...(opts.headers || {}) },
+  });
+  if (r.status === 429 && !retried) {
+    const wait = (parseInt(r.headers.get("Retry-After") || "2", 10) + 1) * 1000;
+    await new Promise((res) => setTimeout(res, wait));
+    return sp(path, opts, true);
+  }
+  if (r.status === 401 && !retried) {
+    store.spotify.tokens && (store.spotify.tokens.exp = 0);
+    return sp(path, opts, true);
+  }
+  if (!r.ok) throw new Error(`spotify ${r.status}: ${await r.text()}`);
+  return r.status === 204 ? null : r.json();
+}
+
+// ---------- library scan ----------
+async function scanLibrary(full = false) {
+  scanAbort = false;
+  const p = store.profile;
+  if (full) Object.assign(p, { builtAt: 0, newestAddedAt: "", count: 0, artists: {}, top: {}, trackKeys: [], isrcs: [], years: {} });
+  const newestKnown = p.newestAddedAt || "";
+  let offset = 0, added = 0, newest = newestKnown, done = false;
+
+  try {
+    const me = await sp("/me");
+    store.spotify.userId = me.id;
+    store.spotify.userName = me.display_name || me.id;
+  } catch (e) {
+    status("connect spotify first — " + e.message);
+    return;
+  }
+
+  while (!done && !scanAbort) {
+    const page = await sp(`/me/tracks?limit=50&offset=${offset}`);
+    for (const item of page.items) {
+      if (newestKnown && item.added_at <= newestKnown) { done = true; break; }
+      const t = item.track;
+      if (!t) continue;
+      if (!newest || item.added_at > newest) newest = item.added_at;
+      const primary = t.artists?.[0]?.name || "";
+      for (const a of t.artists || []) {
+        const k = artistKey(a.name);
+        p.artists[k] = (p.artists[k] || 0) + 1;
+      }
+      const key = normKey(primary, t.name);
+      if (!trackKeySet.has(key)) { trackKeySet.add(key); p.trackKeys.push(key); }
+      const isrc = t.external_ids?.isrc;
+      if (isrc && !isrcSet.has(isrc)) { isrcSet.add(isrc); p.isrcs.push(isrc); }
+      const y = parseInt(String(t.album?.release_date || "").slice(0, 4), 10);
+      if (y) p.years[y] = (p.years[y] || 0) + 1;
+      added++;
+    }
+    offset += 50;
+    if (!page.next) done = true;
+    status(`scanning liked songs… ${p.count + added}`);
+    await new Promise((r) => setTimeout(r, 80));
+  }
+  p.count += added;
+  p.newestAddedAt = newest;
+  p.builtAt = Date.now();
+
+  // top artists across ranges — weights the seed sampling toward what you actually play
+  for (const range of ["long_term", "medium_term", "short_term"]) {
+    try {
+      const top = await sp(`/me/top/artists?time_range=${range}&limit=50`);
+      top.items.forEach((a, i) => {
+        const k = artistKey(a.name);
+        p.top[k] = Math.max(p.top[k] || 0, 50 - i);
+      });
+    } catch {}
+  }
+  await persist(true);
+  renderStatusLine();
+  status(added ? `profile updated — ${added} new likes folded in` : "profile up to date");
+}
+
+// ---------- seeds ----------
+function sampleSeeds(mode, farOut) {
+  const p = store.profile;
+  const entries = Object.entries(p.artists); // [key, count]
+  if (!entries.length) return [];
+  const topBoost = (k) => (p.top[k] || 0) / 10;
+  let pool;
+  if (mode === "deep") {
+    pool = entries.filter(([, c]) => c >= 3);
+    if (!pool.length) pool = entries.filter(([, c]) => c >= 2);
+  } else if (Math.random() < farOut) {
+    const tail = entries.filter(([, c]) => c <= 2);
+    pool = tail.length >= 5 ? tail : entries;
+  } else {
+    pool = entries;
+  }
+  const picks = [];
+  const weights = pool.map(([k, c]) => Math.pow(c, 0.7) + topBoost(k));
+  const total = weights.reduce((a, b) => a + b, 0);
+  const taken = new Set();
+  let guard = 0;
+  while (picks.length < Math.min(3, pool.length) && guard++ < 50) {
+    let r = Math.random() * total;
+    for (let i = 0; i < pool.length; i++) {
+      r -= weights[i];
+      if (r <= 0) {
+        if (!taken.has(i)) { taken.add(i); picks.push(pool[i][0]); }
+        break;
+      }
+    }
+  }
+  return picks;
+}
+
+// ---------- dig ----------
+async function runDig(append = false, seedOverride = null, note = "") {
+  if (digging) return;
+  const mode = $("#modes .on").dataset.mode;
+  const manual = seedOverride || $("#seed").value.trim();
+  let seeds = manual ? manual.split(",").map((s) => s.trim()).filter(Boolean) : sampleSeeds(mode, sliderVal("farout"));
+  if (!seeds.length) {
+    status("connect spotify (settings) or type an artist to dig from");
+    openSettings();
+    return;
+  }
+  digging = true;
+  $("#dig").disabled = true;
+  status("digging…");
+  try {
+    const now = Date.now();
+    const res = await dig(api, {
+      mode,
+      seeds,
+      farOut: sliderVal("farout"),
+      obscurity: sliderVal("obscurity"),
+      yearCap: mode === "gems" ? parseInt($("#yearcap").value, 10) : null,
+      isKnownArtist: (k) => store.profile.artists[k] || 0,
+      hasTrack: (key, isrc) => trackKeySet.has(key) || (isrc && isrcSet.has(isrc)),
+      isSeen: (key) => {
+        if (store.banned[key]) return true;
+        const ts = store.seen[key];
+        return ts && now - ts < 14 * 24 * 3600 * 1000;
+      },
+      batchSize: 48,
+      log: status,
+    });
+    if (!PREVIEW) {
+      for (const t of res.tracks) store.seen[t.key] = now;
+      // prune old seen entries
+      for (const [k, ts] of Object.entries(store.seen)) if (now - ts > 30 * 24 * 3600 * 1000) delete store.seen[k];
+      persist();
+    }
+    if (!append) { batch = []; $("#grid").innerHTML = ""; stopAudio(); }
+    const startIdx = batch.length;
+    batch = batch.concat(res.tracks);
+    renderTracks(res.tracks, startIdx);
+    status(res.tracks.length
+      ? `${batch.length} finds · dug from ${res.seeds.join(", ")}${note ? " · " + note : ""}`
+      : "came up empty — try another seed or ease the obscurity dial");
+  } catch (e) {
+    status("dig failed — " + (e.message || e));
+  }
+  digging = false;
+  $("#dig").disabled = false;
+}
+
+// ---------- grid ----------
+function renderTracks(tracks, startIdx) {
+  const grid = $("#grid");
+  tracks.forEach((t, i) => {
+    const idx = startIdx + i;
+    const tile = el("div", "tile");
+    tile.dataset.idx = idx;
+    const img = el("img");
+    img.loading = "lazy";
+    img.src = t.art;
+    img.alt = "";
+    const meta = el("div", "meta");
+    meta.append(el("div", "t", t.title), el("div", "a", t.artist + (t.year ? " · " + t.year : "")));
+    const acts = el("div", "acts");
+    const love = el("button", "love", "♥");
+    love.title = "save to spotify (L)";
+    const ban = el("button", "ban", "✕");
+    ban.title = "never show again (X)";
+    acts.append(love, ban);
+    const prog = el("div", "prog");
+    const art = el("div", "art");
+    art.append(img, acts, prog);
+    tile.append(art, meta);
+    grid.append(tile);
+
+    img.addEventListener("click", () => (currentIdx === idx && !audio.paused ? pauseAudio() : playIdx(idx)));
+    img.addEventListener("mouseenter", () => {
+      if (store.settings.hoverPlay && userInteracted) playIdx(idx);
+    });
+    love.addEventListener("click", (e) => { e.stopPropagation(); saveTrack(idx); });
+    ban.addEventListener("click", (e) => { e.stopPropagation(); banTrack(idx); });
+  });
+}
+
+function tileFor(idx) {
+  return $(`.tile[data-idx="${idx}"]`);
+}
+
+// ---------- audio ----------
+let userInteracted = false;
+window.addEventListener("pointerdown", () => { userInteracted = true; }, { once: true });
+
+function playIdx(idx) {
+  const t = batch[idx];
+  if (!t || !t.preview) return;
+  document.querySelectorAll(".tile.playing").forEach((n) => n.classList.remove("playing"));
+  currentIdx = idx;
+  const tile = tileFor(idx);
+  if (tile) tile.classList.add("playing");
+  audio.src = t.preview;
+  audio.play().catch(() => status("click anywhere once, then previews can play"));
+  renderNowbar(t);
+}
+
+function pauseAudio() { audio.pause(); }
+function stopAudio() {
+  audio.pause();
+  audio.removeAttribute("src");
+  currentIdx = -1;
+  $("#nowbar").hidden = true;
+  document.querySelectorAll(".tile.playing").forEach((n) => n.classList.remove("playing"));
+}
+
+audio.addEventListener("timeupdate", () => {
+  const tile = tileFor(currentIdx);
+  if (tile && audio.duration) tile.querySelector(".prog").style.width = (audio.currentTime / audio.duration) * 100 + "%";
+  const bar = $("#nowprog");
+  if (bar && audio.duration) bar.style.width = (audio.currentTime / audio.duration) * 100 + "%";
+});
+
+audio.addEventListener("ended", () => {
+  if ($("#drift").checked) {
+    const next = currentIdx + 1;
+    if (next >= batch.length - 6 && !digging) {
+      // keep the crate full: dig onward from the artist we just drifted through
+      const t = batch[currentIdx];
+      runDig(true, t ? t.artist : null);
+    }
+    if (next < batch.length) playIdx(next);
+  }
+});
+
+function renderNowbar(t) {
+  $("#nowbar").hidden = false;
+  $("#nowart").src = t.art;
+  $("#nowtitle").textContent = t.title;
+  $("#nowsub").textContent = t.artist + (t.album ? " — " + t.album : "") + (t.year ? " · " + t.year : "");
+  const saved = store.saved[t.key];
+  $("#nowlove").classList.toggle("done", !!saved);
+  $("#nowprog").style.width = "0%";
+}
+
+// ---------- actions ----------
+async function mapToSpotify(t) {
+  let isrc = t.isrc;
+  if (!isrc) {
+    try {
+      const full = await api.dz(`track/${t.dzId}`);
+      isrc = full?.isrc || null;
+      t.isrc = isrc;
+    } catch {}
+  }
+  if (isrc) {
+    try {
+      const r = await sp(`/search?q=${encodeURIComponent("isrc:" + isrc)}&type=track&limit=1`);
+      const hit = r.tracks?.items?.[0];
+      if (hit) return hit;
+    } catch {}
+  }
+  const q = `track:"${t.title}" artist:"${t.artist}"`;
+  const r = await sp(`/search?q=${encodeURIComponent(q)}&type=track&limit=5`);
+  const items = r.tracks?.items || [];
+  return items.find((it) => normKey(it.artists?.[0]?.name, it.name) === t.key && Math.abs(it.duration_ms / 1000 - t.duration) < 5)
+    || items.find((it) => normKey(it.artists?.[0]?.name, it.name) === t.key)
+    || items[0]
+    || null;
+}
+
+async function ensurePlaylist() {
+  if (store.settings.playlistId) return store.settings.playlistId;
+  const pl = await sp(`/users/${encodeURIComponent(store.spotify.userId)}/playlists`, {
+    method: "POST",
+    body: JSON.stringify({ name: "Crate finds", public: false, description: "dug up by crate, not an algorithm with a marketing budget" }),
+  });
+  store.settings.playlistId = pl.id;
+  persist();
+  return pl.id;
+}
+
+async function saveTrack(idx) {
+  const t = batch[idx];
+  if (!t || store.saved[t.key]) return;
+  const tile = tileFor(idx);
+  if (!store.spotify.tokens) {
+    store.savedLocal.push({ ...t, ts: Date.now() });
+    store.saved[t.key] = { ts: Date.now(), spotifyId: null };
+    persist();
+    tile?.querySelector(".love").classList.add("done");
+    status(`kept locally (no spotify connected): ${t.artist} — ${t.title}`);
+    return;
+  }
+  status(`saving ${t.title}…`);
+  try {
+    const hit = await mapToSpotify(t);
+    if (hit) {
+      await sp(`/me/tracks?ids=${hit.id}`, { method: "PUT", body: JSON.stringify({ ids: [hit.id] }) });
+      if (store.settings.playlist) {
+        const plId = await ensurePlaylist();
+        await sp(`/playlists/${plId}/tracks`, { method: "POST", body: JSON.stringify({ uris: ["spotify:track:" + hit.id] }) });
+      }
+      store.saved[t.key] = { ts: Date.now(), spotifyId: hit.id };
+      // fold into profile immediately so the next dig knows
+      const ak = artistKey(t.artist);
+      store.profile.artists[ak] = (store.profile.artists[ak] || 0) + 1;
+      trackKeySet.add(t.key);
+      store.profile.trackKeys.push(t.key);
+      status(`saved: ${t.artist} — ${t.title}`);
+    } else {
+      store.savedLocal.push({ ...t, ts: Date.now() });
+      store.saved[t.key] = { ts: Date.now(), spotifyId: null };
+      status(`not on spotify — kept in the local log: ${t.artist} — ${t.title}`);
+    }
+    persist();
+    tile?.querySelector(".love").classList.add("done");
+    if (idx === currentIdx) $("#nowlove").classList.add("done");
+  } catch (e) {
+    status("save failed — " + e.message);
+  }
+}
+
+function banTrack(idx) {
+  const t = batch[idx];
+  if (!t) return;
+  store.banned[t.key] = Date.now();
+  persist();
+  const tile = tileFor(idx);
+  if (tile) tile.classList.add("gone");
+  if (idx === currentIdx) {
+    if ($("#drift").checked && idx + 1 < batch.length) playIdx(idx + 1);
+    else stopAudio();
+  }
+}
+
+async function openInSpotify(idx) {
+  const t = batch[idx];
+  if (!t) return;
+  const saved = store.saved[t.key];
+  if (saved?.spotifyId) return window.open("https://open.spotify.com/track/" + saved.spotifyId);
+  if (store.spotify.tokens) {
+    try {
+      const hit = await mapToSpotify(t);
+      if (hit) return window.open("https://open.spotify.com/track/" + hit.id);
+    } catch {}
+  }
+  window.open("https://open.spotify.com/search/" + encodeURIComponent(t.artist + " " + t.title));
+}
+
+// ---------- settings ----------
+function openSettings() { $("#setup").hidden = false; }
+function closeSettings() { $("#setup").hidden = true; }
+
+function bindSettings() {
+  $("#clientid").value = store.spotify.clientId || "";
+  $("#lastfmkey").value = store.lastfm.apiKey || "";
+  $("#optplaylist").checked = !!store.settings.playlist;
+  $("#opthover").checked = !!store.settings.hoverPlay;
+
+  $("#savesetup").addEventListener("click", async () => {
+    store.spotify.clientId = $("#clientid").value.trim();
+    store.lastfm.apiKey = $("#lastfmkey").value.trim();
+    store.settings.playlist = $("#optplaylist").checked;
+    store.settings.hoverPlay = $("#opthover").checked;
+    await persist(true);
+    if (store.lastfm.apiKey && !api.lastfm) {
+      api.lastfm = async (params) => (await fetch("/api/lastfm?" + new URLSearchParams(params))).json();
+    }
+    status("saved");
+  });
+  $("#connect").addEventListener("click", login);
+  $("#rescan").addEventListener("click", () => { closeSettings(); scanLibrary(false); });
+  $("#fullrescan").addEventListener("click", () => { closeSettings(); scanLibrary(true); });
+  $("#disconnect").addEventListener("click", async () => {
+    store.spotify.tokens = null;
+    await persist(true);
+    renderStatusLine();
+    status("disconnected");
+  });
+  $("#closesetup").addEventListener("click", closeSettings);
+}
+
+function renderStatusLine() {
+  const p = store.profile;
+  const who = store.spotify.tokens ? (store.spotify.userName || "connected") : "not connected";
+  $("#acct").textContent = p.count
+    ? `${who} · ${p.count.toLocaleString()} liked songs`
+    : who;
+}
+
+// ---------- controls ----------
+function sliderVal(id) { return parseInt($("#" + id).value, 10) / 100; }
+
+function bindControls() {
+  $("#dig").addEventListener("click", () => runDig(false));
+  $("#seed").addEventListener("keydown", (e) => { if (e.key === "Enter") runDig(false); });
+  for (const b of $("#modes").querySelectorAll("button")) {
+    b.addEventListener("click", () => {
+      $("#modes .on")?.classList.remove("on");
+      b.classList.add("on");
+      $("#yearwrap").hidden = b.dataset.mode !== "gems";
+    });
+  }
+  $("#gear").addEventListener("click", () => ($("#setup").hidden ? openSettings() : closeSettings()));
+
+  $("#nowlove").addEventListener("click", () => saveTrack(currentIdx));
+  $("#nowban").addEventListener("click", () => banTrack(currentIdx));
+  $("#nowopen").addEventListener("click", () => openInSpotify(currentIdx));
+
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT") return;
+    if (e.code === "Space") { e.preventDefault(); audio.paused ? audio.play().catch(() => {}) : audio.pause(); }
+    if (e.key === "n") playIdx(Math.min(currentIdx + 1, batch.length - 1));
+    if (e.key === "p") playIdx(Math.max(currentIdx - 1, 0));
+    if (e.key === "l") saveTrack(currentIdx);
+    if (e.key === "x") banTrack(currentIdx);
+  });
+}
+
+// ---------- boot ----------
+(async function boot() {
+  await loadStore();
+  bindSettings();
+  bindControls();
+
+  if (location.pathname === "/callback") {
+    await handleCallback();
+  }
+
+  renderStatusLine();
+
+  const params = new URLSearchParams(location.search);
+  const demoSeed = params.get("demo");
+
+  if (demoSeed) {
+    $("#seed").value = demoSeed;
+    if (params.get("autodig")) runDig(false);
+  } else if (store.spotify.tokens) {
+    // connected: keep the profile fresh, then open straight into a dig
+    const digIfIdle = () => { if (!batch.length && !digging && store.profile.count) runDig(false); };
+    if (!PREVIEW && Date.now() - (store.profile.builtAt || 0) > 24 * 3600 * 1000) {
+      scanLibrary(false).then(digIfIdle);
+    } else {
+      digIfIdle();
+    }
+  } else if (!store.profile.count) {
+    // fresh crate: open into music, not a form
+    const STARTERS = [
+      "Radiohead", "J Dilla", "Aphex Twin", "Portishead", "Fela Kuti",
+      "Cocteau Twins", "Boards of Canada", "Miles Davis", "Talking Heads",
+      "MF DOOM", "Brian Eno", "Massive Attack", "Stereolab", "Madlib", "Sade",
+    ];
+    const pick = STARTERS[Math.floor(Math.random() * STARTERS.length)];
+    runDig(false, pick, "connect spotify (settings) to dig from your own taste");
+  }
+})();
