@@ -27,7 +27,7 @@ const DEFAULT_STORE = {
   spotify: { clientId: "", tokens: null, userId: "", userName: "" },
   lastfm: { apiKey: "" },
   settings: { playlist: true, playlistId: null, hoverPlay: true },
-  profile: { builtAt: 0, newestAddedAt: "", count: 0, artists: {}, top: {}, trackKeys: [], isrcs: [], years: {} },
+  profile: { builtAt: 0, newestAddedAt: "", count: 0, artists: {}, top: {}, lanes: null, trackKeys: [], isrcs: [], years: {} },
   seen: {},
   banned: {},
   saved: {},

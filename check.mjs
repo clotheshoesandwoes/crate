@@ -1,7 +1,7 @@
 // crate smoke test — spawns the server, hits live Deezer through the proxy,
 // runs the engine end-to-end for all three modes. No Spotify needed.
 import { spawn } from "node:child_process";
-import { dig } from "./public/engine.js";
+import { dig, digFromTrack } from "./public/engine.js";
 
 const PORT = 8824; // separate from the app so a running instance isn't disturbed
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -63,13 +63,29 @@ try {
   // engine, mode: new
   const base = { isKnownArtist: () => 0, hasTrack: () => false, isSeen: () => false, log: () => {} };
   const rNew = await dig(api, { mode: "new", seeds: ["Boards of Canada"], farOut: 0.3, obscurity: 0.6, batchSize: 40, ...base });
-  check("new: enough tracks", rNew.tracks.length >= 15, `${rNew.tracks.length} tracks`);
+  check("new: enough tracks", rNew.tracks.length >= 12, `${rNew.tracks.length} tracks`);
   check("new: all have previews", rNew.tracks.every((t) => t.preview));
   check("new: all have art", rNew.tracks.every((t) => t.art));
+  check("new: all carry provenance", rNew.tracks.every((t) => t.via), rNew.tracks[0]?.via);
   const perArtist = {};
   rNew.tracks.forEach((t) => (perArtist[t.artist] = (perArtist[t.artist] || 0) + 1));
-  check("new: diversified", Math.max(...Object.values(perArtist)) <= 2, `${Object.keys(perArtist).length} artists`);
+  check("new: one per artist", Math.max(...Object.values(perArtist)) <= 1, `${Object.keys(perArtist).length} artists`);
+  const perAlbum = {};
+  rNew.tracks.forEach((t) => t.albumId && (perAlbum[t.albumId] = (perAlbum[t.albumId] || 0) + 1));
+  check("new: one per album", Math.max(...Object.values(perAlbum), 0) <= 1);
   console.log("     sample:", rNew.tracks.slice(0, 5).map((t) => `${t.artist} — ${t.title}`).join(" | "));
+
+  // song → song tunnel (no last.fm key here → artist-graph fallback path)
+  const rTun = await digFromTrack(api, { artist: "Burial", title: "Archangel", obscurity: 0.5, batchSize: 30, ...base });
+  check("tunnel: returns tracks", rTun.tracks.length >= 10, `${rTun.tracks.length} tracks`);
+  check("tunnel: all carry provenance", rTun.tracks.every((t) => t.via));
+
+  // banned-artist branch burial
+  const rPen = await dig(api, {
+    mode: "new", seeds: ["Boards of Canada"], farOut: 0.3, obscurity: 0.6, batchSize: 40, ...base,
+    artistPenalty: (k) => (k === "aphex twin" ? 0 : 1),
+  });
+  check("penalty: banned artist excluded", rPen.tracks.every((t) => t.artist.toLowerCase() !== "aphex twin"));
 
   // engine, mode: gems (year-capped)
   const rGems = await dig(api, { mode: "gems", seeds: ["Portishead"], farOut: 0.3, obscurity: 0.5, yearCap: 2005, batchSize: 30, ...base });

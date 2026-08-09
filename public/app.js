@@ -1,9 +1,10 @@
-// crate — client app: Spotify auth + library profile, dig UI, previews, save-back.
-import { dig, normKey, artistKey } from "./engine.js";
+// crate — client app: Spotify auth + library profile, taste lanes, dig UI,
+// previews, drift, save/queue-back to Spotify.
+import { dig, digFromTrack, normKey, artistKey } from "./engine.js";
 
 const BASE = location.origin;
-const REDIRECT_URI = BASE + "/callback";
-const SCOPES = "user-library-read user-library-modify user-top-read playlist-modify-private";
+const REDIRECT_URI = "http://127.0.0.1:8823/callback"; // Spotify allows loopback only
+const SCOPES = "user-library-read user-library-modify user-top-read playlist-modify-private user-modify-playback-state user-read-playback-state";
 
 const $ = (sel) => document.querySelector(sel);
 // ?preview=1 — screenshot/test mode: dig freely but never scan, mark seen, or persist
@@ -23,6 +24,8 @@ let batch = [];
 let currentIdx = -1;
 let digging = false;
 let scanAbort = false;
+let activeLane = null; // null = everything
+const playedIdx = new Set();
 const audio = new Audio();
 audio.preload = "none";
 
@@ -38,18 +41,20 @@ const api = {
 
 async function loadStore() {
   store = await (await fetch("/api/store")).json();
+  store.profile.lanes = store.profile.lanes || null;
   trackKeySet = new Set(store.profile.trackKeys || []);
   isrcSet = new Set(store.profile.isrcs || []);
+  // prune stale seen entries (30 days)
+  const now = Date.now();
+  for (const [k, ts] of Object.entries(store.seen)) if (now - ts > 30 * 24 * 3600 * 1000) delete store.seen[k];
   if (store.lastfm.apiKey) {
-    api.lastfm = async (params) => {
-      const r = await fetch("/api/lastfm?" + new URLSearchParams(params));
-      return r.json();
-    };
+    api.lastfm = async (params) => (await fetch("/api/lastfm?" + new URLSearchParams(params))).json();
   }
 }
 
 let saveTimer = null;
 function persist(now = false) {
+  if (PREVIEW) return;
   clearTimeout(saveTimer);
   const doSave = () => fetch("/api/store", { method: "POST", body: JSON.stringify(store) });
   if (now) return doSave();
@@ -60,12 +65,44 @@ function status(msg) {
   $("#status").textContent = msg || "";
 }
 
+// ---------- learned dislike: repeated bans of an artist bury the branch ----------
+const softKey = (s) => String(s || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+function makeArtistPenalty() {
+  const counts = {};
+  for (const key of Object.keys(store.banned)) {
+    const a = key.split("::")[0];
+    counts[a] = (counts[a] || 0) + 1;
+  }
+  return (ak) => {
+    const c = counts[softKey(ak)] || 0;
+    return c >= 4 ? 0 : c >= 2 ? 0.25 : 1;
+  };
+}
+
+function digCallbacks() {
+  const now = Date.now();
+  return {
+    isKnownArtist: (k) => store.profile.artists[k] || 0,
+    hasTrack: (key, isrc) => trackKeySet.has(key) || (isrc && isrcSet.has(isrc)),
+    isSeen: (key) => {
+      if (store.banned[key]) return true;
+      const ts = store.seen[key];
+      return ts && now - ts < 14 * 24 * 3600 * 1000;
+    },
+    artistPenalty: makeArtistPenalty(),
+  };
+}
+
 // ---------- spotify auth (PKCE) ----------
 const b64url = (buf) =>
   btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
 async function login() {
   if (!store.spotify.clientId) { openSettings(); return; }
+  if (location.origin !== "http://127.0.0.1:8823") {
+    status("connect from the desktop (http://127.0.0.1:8823) — spotify only allows the loopback address");
+    return;
+  }
   const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
   localStorage.setItem("pkce_verifier", verifier);
   const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
@@ -112,6 +149,9 @@ async function freshToken() {
   const tok = store.spotify.tokens;
   if (!tok) return null;
   if (Date.now() < tok.exp - 60000) return tok.at;
+  // preview/screenshot mode must never rotate the refresh token — a rotation
+  // that isn't persisted would strand the real session's stored token
+  if (PREVIEW) return null;
   try {
     const t = await tokenRequest({ grant_type: "refresh_token", refresh_token: tok.rt });
     store.spotify.tokens = {
@@ -148,11 +188,72 @@ async function sp(path, opts = {}, retried = false) {
   return r.status === 204 ? null : r.json();
 }
 
+// ---------- taste lanes ----------
+// order matters: earlier lanes claim overlapping genre strings first
+const GENRE_LANES = [
+  ["rap", /hip hop|rap|trap|drill|grime|boom bap|phonk/],
+  ["electronic", /electro|techno|house|edm|idm|ambient|drum and bass|dnb|dubstep|garage|synth|downtempo|trip hop|breakbeat|glitch|jungle|rave|club/],
+  ["r&b / soul", /r&b|soul|funk|motown|quiet storm|new jack/],
+  ["indie / rock", /indie|rock|shoegaze|punk|emo|grunge|slacker|lo-fi|post-|alt z|alternative/],
+  ["jazz", /jazz|bop|bossa|swing|fusion/],
+  ["metal", /metal|djent|hardcore|deathcore/],
+  ["folk / country", /folk|country|americana|singer-songwriter|bluegrass|acoustic/],
+  ["classical / score", /classical|orchestra|baroque|compositional|soundtrack|score/],
+  ["global", /latin|afro|reggae|dancehall|k-pop|j-pop|city pop|bollywood|arab|cumbia|salsa|amapiano|highlife/],
+  ["pop", /pop/],
+];
+const laneFor = (genre) => (GENRE_LANES.find(([, re]) => re.test(genre)) || [null])[0];
+
+async function scanTopAndLanes(save = true) {
+  const p = store.profile;
+  const lanes = {};
+  for (const range of ["long_term", "medium_term", "short_term"]) {
+    try {
+      const top = await sp(`/me/top/artists?time_range=${range}&limit=50`);
+      top.items.forEach((a, i) => {
+        const k = artistKey(a.name);
+        p.top[k] = Math.max(p.top[k] || 0, 50 - i);
+        const w = (p.artists[k] || 1) + (50 - i) / 10;
+        for (const lane of new Set((a.genres || []).map(laneFor).filter(Boolean))) {
+          lanes[lane] = lanes[lane] || {};
+          lanes[lane][k] = Math.max(lanes[lane][k] || 0, w);
+        }
+      });
+    } catch {}
+  }
+  if (Object.keys(lanes).length) p.lanes = lanes;
+  if (save) persist(true);
+  renderLanes();
+}
+
+function renderLanes() {
+  const wrap = $("#lanes");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  const lanes = store.profile.lanes;
+  if (!lanes || !Object.keys(lanes).length) return;
+  const ranked = Object.entries(lanes)
+    .map(([name, artists]) => [name, Object.values(artists).reduce((a, b) => a + b, 0)])
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8);
+  const mk = (label, lane) => {
+    const b = el("button", lane === activeLane ? "on" : "", label);
+    b.addEventListener("click", () => {
+      activeLane = lane;
+      renderLanes();
+      runDig(false);
+    });
+    wrap.append(b);
+  };
+  mk("everything", null);
+  for (const [name] of ranked) mk(name, name);
+}
+
 // ---------- library scan ----------
 async function scanLibrary(full = false) {
   scanAbort = false;
   const p = store.profile;
-  if (full) Object.assign(p, { builtAt: 0, newestAddedAt: "", count: 0, artists: {}, top: {}, trackKeys: [], isrcs: [], years: {} });
+  if (full) Object.assign(p, { builtAt: 0, newestAddedAt: "", count: 0, artists: {}, top: {}, lanes: null, trackKeys: [], isrcs: [], years: {} });
   const newestKnown = p.newestAddedAt || "";
   let offset = 0, added = 0, newest = newestKnown, done = false;
 
@@ -173,10 +274,10 @@ async function scanLibrary(full = false) {
       if (!t) continue;
       if (!newest || item.added_at > newest) newest = item.added_at;
       const primary = t.artists?.[0]?.name || "";
-      for (const a of t.artists || []) {
+      (t.artists || []).forEach((a, i) => {
         const k = artistKey(a.name);
-        p.artists[k] = (p.artists[k] || 0) + 1;
-      }
+        p.artists[k] = (p.artists[k] || 0) + (i === 0 ? 1 : 0.4); // feature credits count less
+      });
       const key = normKey(primary, t.name);
       if (!trackKeySet.has(key)) { trackKeySet.add(key); p.trackKeys.push(key); }
       const isrc = t.external_ids?.isrc;
@@ -193,17 +294,7 @@ async function scanLibrary(full = false) {
   p.count += added;
   p.newestAddedAt = newest;
   p.builtAt = Date.now();
-
-  // top artists across ranges — weights the seed sampling toward what you actually play
-  for (const range of ["long_term", "medium_term", "short_term"]) {
-    try {
-      const top = await sp(`/me/top/artists?time_range=${range}&limit=50`);
-      top.items.forEach((a, i) => {
-        const k = artistKey(a.name);
-        p.top[k] = Math.max(p.top[k] || 0, 50 - i);
-      });
-    } catch {}
-  }
+  await scanTopAndLanes(false);
   await persist(true);
   renderStatusLine();
   status(added ? `profile updated — ${added} new likes folded in` : "profile up to date");
@@ -212,15 +303,21 @@ async function scanLibrary(full = false) {
 // ---------- seeds ----------
 function sampleSeeds(mode, farOut) {
   const p = store.profile;
-  const entries = Object.entries(p.artists); // [key, count]
+  let entries;
+  if (activeLane && p.lanes?.[activeLane]) {
+    entries = Object.entries(p.lanes[activeLane]).map(([k, w]) => [k, Math.max(w, p.artists[k] || 0)]);
+  } else {
+    entries = Object.entries(p.artists);
+  }
   if (!entries.length) return [];
   const topBoost = (k) => (p.top[k] || 0) / 10;
   let pool;
   if (mode === "deep") {
-    pool = entries.filter(([, c]) => c >= 3);
-    if (!pool.length) pool = entries.filter(([, c]) => c >= 2);
+    pool = entries.filter(([k]) => (p.artists[k] || 0) >= 3);
+    if (!pool.length) pool = entries.filter(([k]) => (p.artists[k] || 0) >= 2);
+    if (!pool.length) pool = entries;
   } else if (Math.random() < farOut) {
-    const tail = entries.filter(([, c]) => c <= 2);
+    const tail = entries.filter(([k]) => (p.artists[k] || 0) <= 2);
     pool = tail.length >= 5 ? tail : entries;
   } else {
     pool = entries;
@@ -244,6 +341,11 @@ function sampleSeeds(mode, farOut) {
 }
 
 // ---------- dig ----------
+function showDiggingPlaceholder() {
+  const grid = $("#grid");
+  if (!grid.children.length) grid.append(el("div", "digging", "digging…"));
+}
+
 async function runDig(append = false, seedOverride = null, note = "") {
   if (digging) return;
   const mode = $("#modes .on").dataset.mode;
@@ -256,52 +358,98 @@ async function runDig(append = false, seedOverride = null, note = "") {
   }
   digging = true;
   $("#dig").disabled = true;
+  if (!append) {
+    batch = [];
+    playedIdx.clear();
+    $("#grid").innerHTML = "";
+    stopAudio();
+    showDiggingPlaceholder();
+  }
   status("digging…");
   try {
-    const now = Date.now();
     const res = await dig(api, {
       mode,
       seeds,
       farOut: sliderVal("farout"),
       obscurity: sliderVal("obscurity"),
       yearCap: mode === "gems" ? parseInt($("#yearcap").value, 10) : null,
-      isKnownArtist: (k) => store.profile.artists[k] || 0,
-      hasTrack: (key, isrc) => trackKeySet.has(key) || (isrc && isrcSet.has(isrc)),
-      isSeen: (key) => {
-        if (store.banned[key]) return true;
-        const ts = store.seen[key];
-        return ts && now - ts < 14 * 24 * 3600 * 1000;
-      },
-      batchSize: 48,
+      batchSize: 40,
       log: status,
+      ...digCallbacks(),
     });
-    if (!PREVIEW) {
-      for (const t of res.tracks) store.seen[t.key] = now;
-      // prune old seen entries
-      for (const [k, ts] of Object.entries(store.seen)) if (now - ts > 30 * 24 * 3600 * 1000) delete store.seen[k];
-      persist();
-    }
-    if (!append) { batch = []; $("#grid").innerHTML = ""; stopAudio(); }
+    $("#grid .digging")?.remove();
     const startIdx = batch.length;
     batch = batch.concat(res.tracks);
     renderTracks(res.tracks, startIdx);
+    const laneNote = activeLane ? ` · lane: ${activeLane}` : "";
     status(res.tracks.length
-      ? `${batch.length} finds · dug from ${res.seeds.join(", ")}${note ? " · " + note : ""}`
+      ? `${batch.length} finds · dug from ${res.seeds.join(", ")}${laneNote}${note ? " · " + note : ""}`
       : "came up empty — try another seed or ease the obscurity dial");
   } catch (e) {
+    $("#grid .digging")?.remove();
     status("dig failed — " + (e.message || e));
   }
   digging = false;
   $("#dig").disabled = false;
 }
 
+// song → song tunnel from one tile
+async function digFromTile(idx) {
+  const t = batch[idx];
+  if (!t || digging) return;
+  digging = true;
+  $("#dig").disabled = true;
+  stopAudio();
+  batch = [];
+  playedIdx.clear();
+  $("#grid").innerHTML = "";
+  showDiggingPlaceholder();
+  status(`tunneling from “${t.title}”…`);
+  try {
+    const res = await digFromTrack(api, {
+      artist: t.artist,
+      title: t.title,
+      obscurity: sliderVal("obscurity"),
+      batchSize: 40,
+      log: status,
+      ...digCallbacks(),
+    });
+    $("#grid .digging")?.remove();
+    batch = res.tracks;
+    renderTracks(res.tracks, 0);
+    status(res.tracks.length
+      ? `${res.tracks.length} finds · tunneled from ${res.seeds[0]}`
+      : "tunnel came up empty — try digging from the artist instead");
+  } catch (e) {
+    $("#grid .digging")?.remove();
+    status("tunnel failed — " + (e.message || e));
+  }
+  digging = false;
+  $("#dig").disabled = false;
+}
+
 // ---------- grid ----------
+// a tile counts as "seen" only after it's actually been on screen for a beat
+const seenIO = typeof IntersectionObserver !== "undefined"
+  ? new IntersectionObserver((entries) => {
+      for (const en of entries) {
+        if (!en.isIntersecting) { clearTimeout(en.target._seenT); continue; }
+        en.target._seenT = setTimeout(() => {
+          const t = batch[+en.target.dataset.idx];
+          if (t && !PREVIEW && !store.seen[t.key]) { store.seen[t.key] = Date.now(); persist(); }
+          seenIO.unobserve(en.target);
+        }, 1200);
+      }
+    }, { threshold: 0.6 })
+  : null;
+
 function renderTracks(tracks, startIdx) {
   const grid = $("#grid");
   tracks.forEach((t, i) => {
     const idx = startIdx + i;
     const tile = el("div", "tile");
     tile.dataset.idx = idx;
+    if (t.via) tile.title = "via " + t.via;
     const img = el("img");
     img.loading = "lazy";
     img.src = t.art;
@@ -311,20 +459,24 @@ function renderTracks(tracks, startIdx) {
     const acts = el("div", "acts");
     const love = el("button", "love", "♥");
     love.title = "save to spotify (L)";
+    const tunnel = el("button", "tunnel", "⤵");
+    tunnel.title = "dig from this track (D)";
     const ban = el("button", "ban", "✕");
     ban.title = "never show again (X)";
-    acts.append(love, ban);
+    acts.append(love, tunnel, ban);
     const prog = el("div", "prog");
     const art = el("div", "art");
     art.append(img, acts, prog);
     tile.append(art, meta);
     grid.append(tile);
+    seenIO?.observe(tile);
 
     img.addEventListener("click", () => (currentIdx === idx && !audio.paused ? pauseAudio() : playIdx(idx)));
     img.addEventListener("mouseenter", () => {
       if (store.settings.hoverPlay && userInteracted) playIdx(idx);
     });
     love.addEventListener("click", (e) => { e.stopPropagation(); saveTrack(idx); });
+    tunnel.addEventListener("click", (e) => { e.stopPropagation(); digFromTile(idx); });
     ban.addEventListener("click", (e) => { e.stopPropagation(); banTrack(idx); });
   });
 }
@@ -342,6 +494,8 @@ function playIdx(idx) {
   if (!t || !t.preview) return;
   document.querySelectorAll(".tile.playing").forEach((n) => n.classList.remove("playing"));
   currentIdx = idx;
+  playedIdx.add(idx);
+  if (!PREVIEW && !store.seen[t.key]) { store.seen[t.key] = Date.now(); persist(); }
   const tile = tileFor(idx);
   if (tile) tile.classList.add("playing");
   audio.src = t.preview;
@@ -365,23 +519,39 @@ audio.addEventListener("timeupdate", () => {
   if (bar && audio.duration) bar.style.width = (audio.currentTime / audio.duration) * 100 + "%";
 });
 
-audio.addEventListener("ended", () => {
-  if ($("#drift").checked) {
-    const next = currentIdx + 1;
-    if (next >= batch.length - 6 && !digging) {
-      // keep the crate full: dig onward from the artist we just drifted through
-      const t = batch[currentIdx];
-      runDig(true, t ? t.artist : null);
-    }
-    if (next < batch.length) playIdx(next);
+// drift: chain through the batch by provenance, then re-dig onward
+function nextDriftIdx() {
+  const cur = batch[currentIdx];
+  const root = (t) => (t?.via || "").split("→")[0].trim();
+  const open = [];
+  for (let i = 0; i < batch.length; i++) {
+    if (playedIdx.has(i)) continue;
+    const t = batch[i];
+    if (!t || !t.preview || store.banned[t.key]) continue;
+    open.push(i);
   }
+  if (!open.length) return -1;
+  const sameBranch = open.filter((i) => root(batch[i]) && root(batch[i]) === root(cur));
+  return (sameBranch.length ? sameBranch : open)[0];
+}
+
+audio.addEventListener("ended", () => {
+  if (!$("#drift").checked) return;
+  const next = nextDriftIdx();
+  const openCount = batch.length - playedIdx.size;
+  if (openCount <= 6 && !digging) {
+    const t = batch[currentIdx];
+    runDig(true, t ? t.artist : null); // keep the crate full, onward from here
+  }
+  if (next >= 0) playIdx(next);
 });
 
 function renderNowbar(t) {
   $("#nowbar").hidden = false;
   $("#nowart").src = t.art;
   $("#nowtitle").textContent = t.title;
-  $("#nowsub").textContent = t.artist + (t.album ? " — " + t.album : "") + (t.year ? " · " + t.year : "");
+  const via = t.via ? ` · via ${t.via}` : "";
+  $("#nowsub").textContent = t.artist + (t.album ? " — " + t.album : "") + (t.year ? " · " + t.year : "") + via;
   const saved = store.saved[t.key];
   $("#nowlove").classList.toggle("done", !!saved);
   $("#nowprog").style.width = "0%";
@@ -473,8 +643,29 @@ function banTrack(idx) {
   const tile = tileFor(idx);
   if (tile) tile.classList.add("gone");
   if (idx === currentIdx) {
-    if ($("#drift").checked && idx + 1 < batch.length) playIdx(idx + 1);
-    else stopAudio();
+    if ($("#drift").checked) {
+      const next = nextDriftIdx();
+      if (next >= 0) { playIdx(next); return; }
+    }
+    stopAudio();
+  }
+}
+
+async function queueTrack(idx) {
+  const t = batch[idx];
+  if (!t) return;
+  if (!store.spotify.tokens) { status("connect spotify to queue the full track"); return; }
+  status("queueing…");
+  try {
+    const hit = await mapToSpotify(t);
+    if (!hit) { status(`not on spotify — can't queue: ${t.title}`); return; }
+    await sp(`/me/player/queue?uri=${encodeURIComponent("spotify:track:" + hit.id)}`, { method: "POST" });
+    status(`queued on spotify: ${t.artist} — ${t.title}`);
+  } catch (e) {
+    const m = e.message || "";
+    if (m.includes("403")) status("reconnect spotify (settings → connect) once to enable queueing");
+    else if (m.includes("404")) status("no active spotify device — start playback anywhere first, then queue");
+    else status("queue failed — " + m);
   }
 }
 
@@ -550,15 +741,18 @@ function bindControls() {
 
   $("#nowlove").addEventListener("click", () => saveTrack(currentIdx));
   $("#nowban").addEventListener("click", () => banTrack(currentIdx));
+  $("#nowqueue")?.addEventListener("click", () => queueTrack(currentIdx));
   $("#nowopen").addEventListener("click", () => openInSpotify(currentIdx));
 
   document.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT") return;
+    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
     if (e.code === "Space") { e.preventDefault(); audio.paused ? audio.play().catch(() => {}) : audio.pause(); }
     if (e.key === "n") playIdx(Math.min(currentIdx + 1, batch.length - 1));
     if (e.key === "p") playIdx(Math.max(currentIdx - 1, 0));
     if (e.key === "l") saveTrack(currentIdx);
     if (e.key === "x") banTrack(currentIdx);
+    if (e.key === "d") digFromTile(currentIdx);
+    if (e.key === "q") queueTrack(currentIdx);
   });
 }
 
@@ -573,6 +767,7 @@ function bindControls() {
   }
 
   renderStatusLine();
+  renderLanes();
 
   const params = new URLSearchParams(location.search);
   const demoSeed = params.get("demo");
@@ -581,10 +776,13 @@ function bindControls() {
     $("#seed").value = demoSeed;
     if (params.get("autodig")) runDig(false);
   } else if (store.spotify.tokens) {
-    // connected: keep the profile fresh, then open straight into a dig
+    // connected: keep the profile + lanes fresh, then open straight into a dig
     const digIfIdle = () => { if (!batch.length && !digging && store.profile.count) runDig(false); };
-    if (!PREVIEW && Date.now() - (store.profile.builtAt || 0) > 24 * 3600 * 1000) {
+    const needScan = Date.now() - (store.profile.builtAt || 0) > 24 * 3600 * 1000;
+    if (!PREVIEW && needScan) {
       scanLibrary(false).then(digIfIdle);
+    } else if (!store.profile.lanes) {
+      scanTopAndLanes(!PREVIEW).then(digIfIdle);
     } else {
       digIfIdle();
     }

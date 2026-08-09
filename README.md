@@ -35,20 +35,29 @@ adds a second, community-driven similarity graph on top of Deezer's.
 
 ## Use
 
-- **Dig** — fills the grid with ~48 finds. Blank seed = sampled from your
-  taste; or type any artist ("dig from…").
-- **Modes**: *New* (artists you don't know), *Old gems* (year-capped album
-  digs, oldest-first bias), *Deep cuts* (non-hit album tracks from artists you
-  already love).
-- **Dials**: familiar↔far out (how far the graph walk wanders), popular↔obscure
-  (fan-count / rank caps — push it right to escape the mainstream).
-- Click a cover to play the 30s preview (hover-to-play can be enabled in
-  settings). **Drift** auto-plays onward and re-digs from wherever you drifted
-  to when the crate runs low — a shuffle that actually goes somewhere.
-- **♥** saves to your Liked Songs + a private *Crate finds* playlist and feeds
-  the profile so the next dig knows. **✕** bans a track forever. Everything
-  shown is remembered and won't reappear for 14 days.
-- Keys: `space` pause · `n`/`p` next/prev · `l` love · `x` ban.
+- **Dig** — fills the grid with finds, one artist per tile, never two cuts
+  off the same album. Blank seed = sampled from your taste; or type any artist.
+- **Lanes** — your library is clustered into taste lanes (rap, electronic,
+  indie, …) from real genre data; click one to dig only that side of you.
+- **Modes**: *New* (artists you don't know, mid-catalog — not their hits),
+  *Old gems* (year-capped album digs, oldest-first bias), *Deep cuts* (non-hit
+  album tracks from artists you already love).
+- **Dials**: familiar↔far out (graph-walk distance — always at least two hops
+  out), popular↔obscure (fan-count / rank caps — push right to leave the
+  mainstream entirely).
+- **⤵ on any tile tunnels from that exact track** — Last.fm song-to-song
+  similarity when a key is configured, artist-graph tunnel otherwise. Hover a
+  tile to see *why* it's there (via which seed → branch).
+- Click a cover for the 30s preview. **Drift** chains onward through the same
+  branch of the graph and re-digs from wherever it drifted when the crate runs
+  low — a shuffle that actually goes somewhere. **queue** sends the full track
+  to whatever Spotify is playing on (Premium).
+- **♥** saves to Liked Songs + a private *Crate finds* playlist and feeds the
+  profile. **✕** bans a track forever — and repeated bans of an artist bury
+  that whole branch of the graph. Only tracks you've actually seen or heard
+  go into the 14-day no-repeat window.
+- Keys: `space` pause · `n`/`p` next/prev · `l` love · `x` ban · `d` tunnel ·
+  `q` queue.
 
 ## Files
 
