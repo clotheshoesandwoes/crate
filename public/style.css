@@ -222,7 +222,83 @@ button.quiet:hover { color: var(--fg); text-decoration-color: var(--fg); }
 }
 .row.buttons button:not(.quiet):hover { background: var(--fg); color: var(--bg); }
 .row.buttons.secondary { margin-top: 8px; }
+.row select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  padding: 8px 11px;
+  cursor: pointer;
+}
 .fine { font-size: 12px; margin-bottom: 0 !important; }
+
+/* ---------- profile ---------- */
+#profile { padding: 28px 30px; }
+.panel.wide { max-width: 960px; }
+.panel h3 {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--mut);
+  margin: 22px 0 10px;
+}
+.panel h3:first-child { margin-top: 0; }
+#profstats { font-size: 13px; }
+.profcols {
+  display: grid;
+  grid-template-columns: 230px 1fr;
+  gap: 8px 40px;
+  margin-top: 6px;
+}
+.profside ul { list-style: none; }
+.profside li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  padding: 3px 0;
+}
+.profside li .lbl { min-width: 92px; }
+.profside li .bar { height: 3px; background: var(--fg); opacity: 0.55; }
+.profside li.empty, #findslist .empty { color: var(--mut); font-size: 12px; }
+.findsbar { display: flex; gap: 10px; margin-bottom: 14px; }
+.findsbar input {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  padding: 7px 10px;
+}
+.findsbar button {
+  border: 1px solid var(--fg);
+  border-radius: 4px;
+  padding: 7px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.findsbar button:hover:not(:disabled) { background: var(--fg); color: var(--bg); }
+.findsbar button:disabled { opacity: 0.5; cursor: default; }
+#findslist { max-height: 54vh; overflow-y: auto; }
+.find {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+.find:last-child { border-bottom: none; }
+.find img { width: 38px; height: 38px; object-fit: cover; background: var(--bg); flex: none; }
+.fmeta { min-width: 0; flex: 1; }
+.ft { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fa { font-size: 12px; color: var(--mut); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fwhen { font-size: 11px; color: var(--mut); flex: none; }
+.fopen { font-size: 12px; color: var(--mut); flex: none; text-underline-offset: 3px; }
+.fopen:hover { color: var(--fg); }
+
+@media (max-width: 900px) {
+  .profcols { grid-template-columns: 1fr; }
+  #profile { padding: 20px; }
+}
 
 /* ---------- grid ---------- */
 #grid {
@@ -329,6 +405,10 @@ button.quiet:hover { color: var(--fg); text-decoration-color: var(--fg); }
   height: 1px;
   width: 0%;
   background: var(--fg);
+}
+
+@media (max-width: 620px) {
+  #acct { display: none; }
 }
 
 @media (max-width: 900px) {

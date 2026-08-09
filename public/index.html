@@ -22,6 +22,7 @@
     </nav>
     <div class="right">
       <span id="acct"></span>
+      <button id="prof" class="quiet">profile</button>
       <button id="gear" class="quiet">settings</button>
     </div>
   </div>
@@ -61,9 +62,8 @@
     </ol>
 
     <div class="row"><label for="clientid">Spotify Client ID</label><input id="clientid" spellcheck="false"></div>
-    <div class="row"><label for="lastfmkey">Last.fm API key <span class="opt">(optional — second similarity graph)</span></label><input id="lastfmkey" spellcheck="false"></div>
+    <div class="row"><label for="pldest">♥ saves to Liked Songs, and also to</label><select id="pldest"><option value="crate">Crate finds (auto)</option><option value="none">liked songs only</option></select></div>
     <div class="row checks">
-      <label><input type="checkbox" id="optplaylist"> also add finds to a “Crate finds” playlist</label>
       <label><input type="checkbox" id="opthover"> hover a cover to preview it</label>
     </div>
 
@@ -81,6 +81,30 @@
 
     <p class="fine">No Spotify yet? Type an artist in the top bar and dig — previews come from
     open sources and work without an account. Everything is stored in <code>data\store.json</code> on this machine.</p>
+  </div>
+</section>
+
+<section id="profile" hidden>
+  <div class="panel wide">
+    <h2 id="profwho">your crate</h2>
+    <p id="profstats"></p>
+    <div class="profcols">
+      <div class="profside">
+        <h3>lanes</h3>
+        <ul id="proflanes"></ul>
+        <h3>most dug artists</h3>
+        <ul id="profartists"></ul>
+      </div>
+      <div class="findswrap">
+        <h3>finds <span id="findcount"></span></h3>
+        <div class="findsbar">
+          <input id="plname" type="text" placeholder="playlist name… (blank = crate · date)" spellcheck="false">
+          <button id="mkpl">bottle into a playlist</button>
+        </div>
+        <div id="findslist"></div>
+      </div>
+    </div>
+    <div class="row buttons"><button id="closeprofile" class="quiet">close</button></div>
   </div>
 </section>
 

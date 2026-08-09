@@ -29,9 +29,7 @@ Needs Node, no npm install.
 
 First connect scans your Liked Songs (a few minutes if you have thousands;
 incremental afterwards) plus your top artists, and stores the profile locally.
-
-Optional: a free [Last.fm API key](https://www.last.fm/api/account/create)
-adds a second, community-driven similarity graph on top of Deezer's.
+No other accounts or services involved — just your Spotify and open data.
 
 ## Use
 
@@ -45,17 +43,22 @@ adds a second, community-driven similarity graph on top of Deezer's.
 - **Dials**: familiar↔far out (graph-walk distance — always at least two hops
   out), popular↔obscure (fan-count / rank caps — push right to leave the
   mainstream entirely).
-- **⤵ on any tile tunnels from that exact track** — Last.fm song-to-song
-  similarity when a key is configured, artist-graph tunnel otherwise. Hover a
-  tile to see *why* it's there (via which seed → branch).
+- **⤵ on any tile tunnels from that exact track** — a dig seeded from its
+  maker's corner of the graph. Hover a tile to see *why* it's there (via which
+  seed → branch).
 - Click a cover for the 30s preview. **Drift** chains onward through the same
   branch of the graph and re-digs from wherever it drifted when the crate runs
   low — a shuffle that actually goes somewhere. **queue** sends the full track
   to whatever Spotify is playing on (Premium).
-- **♥** saves to Liked Songs + a private *Crate finds* playlist and feeds the
+- **♥** saves to Liked Songs + a playlist of your choosing (settings: the
+  auto *Crate finds*, any playlist you own, or likes only) and feeds the
   profile. **✕** bans a track forever — and repeated bans of an artist bury
   that whole branch of the graph. Only tracks you've actually seen or heard
   go into the 14-day no-repeat window.
+- **Profile** (top right): the shape of your library — lanes, most-dug
+  artists, its vintage — plus the log of every find with open-in-Spotify
+  links, and **bottle into a playlist**: turn your recent finds into a fresh
+  named playlist in one click.
 - Keys: `space` pause · `n`/`p` next/prev · `l` love · `x` ban · `d` tunnel ·
   `q` queue.
 

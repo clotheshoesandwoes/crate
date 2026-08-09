@@ -4,7 +4,7 @@ import { dig, digFromTrack, normKey, artistKey } from "./engine.js";
 
 const BASE = location.origin;
 const REDIRECT_URI = "http://127.0.0.1:8823/callback"; // Spotify allows loopback only
-const SCOPES = "user-library-read user-library-modify user-top-read playlist-modify-private user-modify-playback-state user-read-playback-state";
+const SCOPES = "user-library-read user-library-modify user-top-read playlist-read-private playlist-modify-private playlist-modify-public user-modify-playback-state user-read-playback-state";
 
 const $ = (sel) => document.querySelector(sel);
 // ?preview=1 — screenshot/test mode: dig freely but never scan, mark seen, or persist
@@ -42,6 +42,8 @@ const api = {
 async function loadStore() {
   store = await (await fetch("/api/store")).json();
   store.profile.lanes = store.profile.lanes || null;
+  store.finds = store.finds || [];
+  if (!store.settings.playlistMode) store.settings.playlistMode = store.settings.playlist === false ? "none" : "crate";
   trackKeySet = new Set(store.profile.trackKeys || []);
   isrcSet = new Set(store.profile.isrcs || []);
   // prune stale seen entries (30 days)
@@ -583,7 +585,12 @@ async function mapToSpotify(t) {
     || null;
 }
 
-async function ensurePlaylist() {
+// where ♥ lands besides Liked Songs: "crate" = auto "Crate finds" playlist,
+// "none" = liked only, anything else = one of the user's own playlist ids
+async function destPlaylistId() {
+  const mode = store.settings.playlistMode || "crate";
+  if (mode === "none") return null;
+  if (mode !== "crate") return mode;
   if (store.settings.playlistId) return store.settings.playlistId;
   const pl = await sp(`/users/${encodeURIComponent(store.spotify.userId)}/playlists`, {
     method: "POST",
@@ -594,6 +601,14 @@ async function ensurePlaylist() {
   return pl.id;
 }
 
+function logFind(t, spotifyId) {
+  store.finds.unshift({
+    key: t.key, ts: Date.now(), spotifyId: spotifyId || null,
+    title: t.title, artist: t.artist, album: t.album || "", year: t.year || null, art: t.art || "",
+  });
+  if (store.finds.length > 400) store.finds.length = 400;
+}
+
 async function saveTrack(idx) {
   const t = batch[idx];
   if (!t || store.saved[t.key]) return;
@@ -601,6 +616,7 @@ async function saveTrack(idx) {
   if (!store.spotify.tokens) {
     store.savedLocal.push({ ...t, ts: Date.now() });
     store.saved[t.key] = { ts: Date.now(), spotifyId: null };
+    logFind(t, null);
     persist();
     tile?.querySelector(".love").classList.add("done");
     status(`kept locally (no spotify connected): ${t.artist} — ${t.title}`);
@@ -611,11 +627,14 @@ async function saveTrack(idx) {
     const hit = await mapToSpotify(t);
     if (hit) {
       await sp(`/me/tracks?ids=${hit.id}`, { method: "PUT", body: JSON.stringify({ ids: [hit.id] }) });
-      if (store.settings.playlist) {
-        const plId = await ensurePlaylist();
-        await sp(`/playlists/${plId}/tracks`, { method: "POST", body: JSON.stringify({ uris: ["spotify:track:" + hit.id] }) });
+      try {
+        const plId = await destPlaylistId();
+        if (plId) await sp(`/playlists/${plId}/tracks`, { method: "POST", body: JSON.stringify({ uris: ["spotify:track:" + hit.id] }) });
+      } catch (e) {
+        status(`liked, but playlist add failed — ${e.message}`);
       }
       store.saved[t.key] = { ts: Date.now(), spotifyId: hit.id };
+      logFind(t, hit.id);
       // fold into profile immediately so the next dig knows
       const ak = artistKey(t.artist);
       store.profile.artists[ak] = (store.profile.artists[ak] || 0) + 1;
@@ -625,6 +644,7 @@ async function saveTrack(idx) {
     } else {
       store.savedLocal.push({ ...t, ts: Date.now() });
       store.saved[t.key] = { ts: Date.now(), spotifyId: null };
+      logFind(t, null);
       status(`not on spotify — kept in the local log: ${t.artist} — ${t.title}`);
     }
     persist();
@@ -684,24 +704,45 @@ async function openInSpotify(idx) {
 }
 
 // ---------- settings ----------
-function openSettings() { $("#setup").hidden = false; }
+function openSettings() { $("#setup").hidden = false; $("#profile").hidden = true; populatePlaylistPicker(); }
 function closeSettings() { $("#setup").hidden = true; }
+
+async function populatePlaylistPicker() {
+  const sel = $("#pldest");
+  if (!sel || sel.dataset.loaded) return;
+  const mode = store.settings.playlistMode || "crate";
+  const opt = (value, label) => {
+    const o = document.createElement("option");
+    o.value = value; o.textContent = label;
+    if (value === mode) o.selected = true;
+    sel.append(o);
+  };
+  sel.innerHTML = "";
+  opt("crate", "Crate finds (auto)");
+  opt("none", "liked songs only");
+  if (store.spotify.tokens) {
+    try {
+      const r = await sp("/me/playlists?limit=50");
+      for (const pl of r.items || []) {
+        if (pl.owner?.id === store.spotify.userId || pl.collaborative) opt(pl.id, pl.name);
+      }
+      sel.dataset.loaded = "1";
+    } catch {
+      // old token without playlist-read scope — picker works after a reconnect
+    }
+  }
+}
 
 function bindSettings() {
   $("#clientid").value = store.spotify.clientId || "";
-  $("#lastfmkey").value = store.lastfm.apiKey || "";
-  $("#optplaylist").checked = !!store.settings.playlist;
   $("#opthover").checked = !!store.settings.hoverPlay;
 
   $("#savesetup").addEventListener("click", async () => {
     store.spotify.clientId = $("#clientid").value.trim();
-    store.lastfm.apiKey = $("#lastfmkey").value.trim();
-    store.settings.playlist = $("#optplaylist").checked;
+    store.settings.playlistMode = $("#pldest").value || "crate";
+    store.settings.playlist = store.settings.playlistMode !== "none";
     store.settings.hoverPlay = $("#opthover").checked;
     await persist(true);
-    if (store.lastfm.apiKey && !api.lastfm) {
-      api.lastfm = async (params) => (await fetch("/api/lastfm?" + new URLSearchParams(params))).json();
-    }
     status("saved");
   });
   $("#connect").addEventListener("click", login);
@@ -724,6 +765,112 @@ function renderStatusLine() {
     : who;
 }
 
+// ---------- profile ----------
+const ago = (ts) => {
+  const d = Math.floor((Date.now() - ts) / 86400000);
+  return d === 0 ? "today" : d === 1 ? "yesterday" : `${d}d ago`;
+};
+
+function openProfile() { $("#profile").hidden = false; $("#setup").hidden = true; renderProfile(); }
+function closeProfile() { $("#profile").hidden = true; }
+
+function renderProfile() {
+  const p = store.profile;
+  $("#profwho").textContent = store.spotify.userName ? `${store.spotify.userName}'s crate` : "your crate";
+
+  // one honest line about the shape of the library
+  const years = Object.entries(p.years || {}).map(([y, n]) => [+y, n]).sort((a, b) => a[0] - b[0]);
+  let vintage = "";
+  if (years.length > 3) {
+    const total = years.reduce((s, [, n]) => s + n, 0);
+    let acc = 0, lo = years[0][0], hi = years[years.length - 1][0];
+    for (const [y, n] of years) { acc += n; if (acc / total > 0.25) { lo = y; break; } }
+    acc = 0;
+    for (let i = years.length - 1; i >= 0; i--) { acc += years[i][1]; if (acc / total > 0.25) { hi = years[i][0]; break; } }
+    vintage = ` · the heart of it lives ${Math.min(lo, hi)}–${Math.max(lo, hi)}, oldest corners reach ${years[0][0]}`;
+  }
+  $("#profstats").textContent =
+    `${(p.count || 0).toLocaleString()} liked songs · ${Object.keys(p.artists || {}).length.toLocaleString()} artists` +
+    `${vintage} · ${store.finds.length} finds dug so far`;
+
+  // lanes, ranked
+  const lanesEl = $("#proflanes");
+  lanesEl.innerHTML = "";
+  const lanes = p.lanes ? Object.entries(p.lanes)
+    .map(([name, artists]) => [name, Object.values(artists).reduce((a, b) => a + b, 0)])
+    .sort((a, b) => b[1] - a[1]) : [];
+  const laneMax = lanes[0]?.[1] || 1;
+  for (const [name, w] of lanes.slice(0, 8)) {
+    const li = el("li");
+    const bar = el("span", "bar");
+    bar.style.width = Math.max(6, (w / laneMax) * 100) + "%";
+    li.append(el("span", "lbl", name), bar);
+    lanesEl.append(li);
+  }
+  if (!lanes.length) lanesEl.append(el("li", "empty", "lanes appear after a scan (reconnect + reload)"));
+
+  // most-dug artists: library weight + listening rank
+  const artistsEl = $("#profartists");
+  artistsEl.innerHTML = "";
+  const ranked = Object.entries(p.artists || {})
+    .map(([k, c]) => [k, c + (p.top[k] || 0) / 5])
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12);
+  for (const [name] of ranked) artistsEl.append(el("li", "", name));
+
+  // the finds log
+  $("#findcount").textContent = store.finds.length ? `· ${store.finds.length}` : "";
+  const list = $("#findslist");
+  list.innerHTML = "";
+  if (!store.finds.length) {
+    list.append(el("div", "empty", "nothing logged yet — ♥ a find and it lands here (and in your spotify likes)"));
+  }
+  for (const f of store.finds.slice(0, 120)) {
+    const row = el("div", "find");
+    const img = el("img");
+    img.src = f.art; img.loading = "lazy"; img.alt = "";
+    const meta = el("div", "fmeta");
+    meta.append(
+      el("div", "ft", f.title),
+      el("div", "fa", f.artist + (f.year ? " · " + f.year : "") + (f.spotifyId ? "" : " · not on spotify"))
+    );
+    const when = el("span", "fwhen", ago(f.ts));
+    const open = el("a", "fopen", "open");
+    open.href = f.spotifyId
+      ? "https://open.spotify.com/track/" + f.spotifyId
+      : "https://open.spotify.com/search/" + encodeURIComponent(f.artist + " " + f.title);
+    open.target = "_blank";
+    row.append(img, meta, when, open);
+    list.append(row);
+  }
+}
+
+// the discoverquickly move: bottle recent finds into a fresh playlist
+async function makePlaylistFromFinds() {
+  if (!store.spotify.tokens) { status("connect spotify first"); return; }
+  const ids = store.finds.filter((f) => f.spotifyId).slice(0, 100).map((f) => f.spotifyId);
+  if (!ids.length) { status("no spotify-matched finds to bottle yet — ♥ some first"); return; }
+  const name = $("#plname").value.trim() || "crate · " + new Date().toISOString().slice(0, 10);
+  const btn = $("#mkpl");
+  btn.disabled = true;
+  status(`bottling ${ids.length} finds into “${name}”…`);
+  try {
+    const pl = await sp(`/users/${encodeURIComponent(store.spotify.userId)}/playlists`, {
+      method: "POST",
+      body: JSON.stringify({ name, public: false, description: "dug up by crate" }),
+    });
+    await sp(`/playlists/${pl.id}/tracks`, {
+      method: "POST",
+      body: JSON.stringify({ uris: ids.map((id) => "spotify:track:" + id) }),
+    });
+    status(`playlist made: ${name} — ${ids.length} tracks`);
+    window.open("https://open.spotify.com/playlist/" + pl.id);
+  } catch (e) {
+    status("playlist failed — " + e.message);
+  }
+  btn.disabled = false;
+}
+
 // ---------- controls ----------
 function sliderVal(id) { return parseInt($("#" + id).value, 10) / 100; }
 
@@ -738,6 +885,9 @@ function bindControls() {
     });
   }
   $("#gear").addEventListener("click", () => ($("#setup").hidden ? openSettings() : closeSettings()));
+  $("#prof")?.addEventListener("click", () => ($("#profile").hidden ? openProfile() : closeProfile()));
+  $("#closeprofile")?.addEventListener("click", closeProfile);
+  $("#mkpl")?.addEventListener("click", makePlaylistFromFinds);
 
   $("#nowlove").addEventListener("click", () => saveTrack(currentIdx));
   $("#nowban").addEventListener("click", () => banTrack(currentIdx));
@@ -771,6 +921,7 @@ function bindControls() {
 
   const params = new URLSearchParams(location.search);
   const demoSeed = params.get("demo");
+  if (params.get("panel") === "profile") openProfile();
 
   if (demoSeed) {
     $("#seed").value = demoSeed;

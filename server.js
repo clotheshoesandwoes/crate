@@ -32,6 +32,7 @@ const DEFAULT_STORE = {
   banned: {},
   saved: {},
   savedLocal: [],
+  finds: [],
 };
 
 function loadStore() {
