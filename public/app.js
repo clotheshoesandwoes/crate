@@ -489,7 +489,8 @@ function renderTracks(tracks, startIdx) {
 
     img.addEventListener("click", () => (currentIdx === idx && !audio.paused ? pauseAudio() : playIdx(idx)));
     img.addEventListener("mouseenter", () => {
-      if (store.settings.hoverPlay && userInteracted) playIdx(idx);
+      // hover only ever previews — full plays are deliberate taps
+      if (store.settings.hoverPlay && userInteracted && !$("#fullplay")?.checked) playIdx(idx);
     });
     love.addEventListener("click", (e) => { e.stopPropagation(); saveTrack(idx); });
     tunnel.addEventListener("click", (e) => { e.stopPropagation(); digFromTile(idx); });
@@ -507,7 +508,9 @@ window.addEventListener("pointerdown", () => { userInteracted = true; }, { once:
 
 function playIdx(idx) {
   const t = batch[idx];
-  if (!t || !t.preview) return;
+  if (!t) return;
+  if ($("#fullplay")?.checked && store.spotify.tokens) return playFull(idx);
+  if (!t.preview) return;
   document.querySelectorAll(".tile.playing").forEach((n) => n.classList.remove("playing"));
   currentIdx = idx;
   playedIdx.add(idx);
@@ -517,6 +520,32 @@ function playIdx(idx) {
   audio.src = t.preview;
   audio.play().catch(() => status("click anywhere once, then previews can play"));
   renderNowbar(t);
+}
+
+// full-track mode: crate is the remote, your Spotify app (car, speakers,
+// desktop — whatever device is active) does the playing
+async function playFull(idx) {
+  const t = batch[idx];
+  if (!t) return;
+  document.querySelectorAll(".tile.playing").forEach((n) => n.classList.remove("playing"));
+  audio.pause();
+  currentIdx = idx;
+  playedIdx.add(idx);
+  if (!PREVIEW && !store.seen[t.key]) { store.seen[t.key] = Date.now(); persist(); }
+  tileFor(idx)?.classList.add("playing");
+  renderNowbar(t, "playing full in your spotify");
+  status(`sending to spotify: ${t.title}…`);
+  try {
+    const hit = await mapToSpotify(t);
+    if (!hit) { status(`not on spotify — preview only: ${t.title}`); return; }
+    await sp("/me/player/play", { method: "PUT", body: JSON.stringify({ uris: ["spotify:track:" + hit.id] }) });
+    status(`playing in spotify: ${t.artist} — ${t.title}`);
+  } catch (e) {
+    const m = e.message || "";
+    if (m.includes("404")) status("no active spotify device — open spotify, play anything once, then tap again");
+    else if (m.includes("403")) status("this connection is missing playback permission — settings → connect spotify once");
+    else status("play failed — " + m);
+  }
 }
 
 function pauseAudio() { audio.pause(); }
@@ -562,12 +591,12 @@ audio.addEventListener("ended", () => {
   if (next >= 0) playIdx(next);
 });
 
-function renderNowbar(t) {
+function renderNowbar(t, note = "") {
   $("#nowbar").hidden = false;
   $("#nowart").src = t.art;
   $("#nowtitle").textContent = t.title;
   const via = t.via ? ` · via ${t.via}` : "";
-  $("#nowsub").textContent = t.artist + (t.album ? " — " + t.album : "") + (t.year ? " · " + t.year : "") + via;
+  $("#nowsub").textContent = t.artist + (t.album ? " — " + t.album : "") + (t.year ? " · " + t.year : "") + via + (note ? " · " + note : "");
   const saved = store.saved[t.key];
   $("#nowlove").classList.toggle("done", !!saved);
   $("#nowprog").style.width = "0%";
@@ -901,6 +930,11 @@ function bindControls() {
     });
   }
   $("#gear").addEventListener("click", () => ($("#setup").hidden ? openSettings() : closeSettings()));
+  const fp = $("#fullplay");
+  if (fp) {
+    fp.checked = !!store.settings.fullPlay;
+    fp.addEventListener("change", () => { store.settings.fullPlay = fp.checked; persist(); });
+  }
   $("#prof")?.addEventListener("click", () => ($("#profile").hidden ? openProfile() : closeProfile()));
   $("#closeprofile")?.addEventListener("click", closeProfile);
   $("#mkpl")?.addEventListener("click", makePlaylistFromFinds);
