@@ -398,8 +398,9 @@ async function runDig(append = false, seedOverride = null, note = "") {
     batch = batch.concat(res.tracks);
     renderTracks(res.tracks, startIdx);
     const laneNote = activeLane ? ` · lane: ${activeLane}` : "";
+    const listenHint = playedIdx.size ? "" : " · tap any cover to listen";
     status(res.tracks.length
-      ? `${batch.length} finds · dug from ${res.seeds.join(", ")}${laneNote}${note ? " · " + note : ""}`
+      ? `${batch.length} finds · dug from ${res.seeds.join(", ")}${laneNote}${listenHint}${note ? " · " + note : ""}`
       : "came up empty — try another seed or ease the obscurity dial");
   } catch (e) {
     $("#grid .digging")?.remove();
@@ -510,7 +511,13 @@ function playIdx(idx) {
   const t = batch[idx];
   if (!t) return;
   if ($("#fullplay")?.checked && store.spotify.tokens) return playFull(idx);
-  if (!t.preview) return;
+  playPreview(idx);
+}
+
+// the always-works path: 30s preview right here in the page
+function playPreview(idx) {
+  const t = batch[idx];
+  if (!t || !t.preview) return;
   document.querySelectorAll(".tile.playing").forEach((n) => n.classList.remove("playing"));
   currentIdx = idx;
   playedIdx.add(idx);
@@ -518,33 +525,39 @@ function playIdx(idx) {
   const tile = tileFor(idx);
   if (tile) tile.classList.add("playing");
   audio.src = t.preview;
-  audio.play().catch(() => status("click anywhere once, then previews can play"));
+  audio.play().catch(() => status("tap once more and it'll play"));
   renderNowbar(t);
 }
 
 // full-track mode: crate is the remote, your Spotify app (car, speakers,
-// desktop — whatever device is active) does the playing
+// desktop — whatever device is active) does the playing. If Spotify can't
+// take the handoff, fall back to the preview — a tap must always make sound.
 async function playFull(idx) {
   const t = batch[idx];
   if (!t) return;
-  document.querySelectorAll(".tile.playing").forEach((n) => n.classList.remove("playing"));
-  audio.pause();
-  currentIdx = idx;
-  playedIdx.add(idx);
-  if (!PREVIEW && !store.seen[t.key]) { store.seen[t.key] = Date.now(); persist(); }
-  tileFor(idx)?.classList.add("playing");
-  renderNowbar(t, "playing full in your spotify");
   status(`sending to spotify: ${t.title}…`);
   try {
     const hit = await mapToSpotify(t);
-    if (!hit) { status(`not on spotify — preview only: ${t.title}`); return; }
+    if (!hit) {
+      playPreview(idx);
+      status(`not on spotify — playing the preview: ${t.title}`);
+      return;
+    }
     await sp("/me/player/play", { method: "PUT", body: JSON.stringify({ uris: ["spotify:track:" + hit.id] }) });
+    document.querySelectorAll(".tile.playing").forEach((n) => n.classList.remove("playing"));
+    audio.pause();
+    currentIdx = idx;
+    playedIdx.add(idx);
+    if (!PREVIEW && !store.seen[t.key]) { store.seen[t.key] = Date.now(); persist(); }
+    tileFor(idx)?.classList.add("playing");
+    renderNowbar(t, "playing full in your spotify");
     status(`playing in spotify: ${t.artist} — ${t.title}`);
   } catch (e) {
     const m = e.message || "";
-    if (m.includes("404")) status("no active spotify device — open spotify, play anything once, then tap again");
-    else if (m.includes("403")) status("this connection is missing playback permission — settings → connect spotify once");
-    else status("play failed — " + m);
+    playPreview(idx);
+    if (m.includes("404")) status("spotify app isn't active — playing the 30s preview here instead");
+    else if (m.includes("403")) status("playing preview — reconnect spotify (settings) to enable full tracks");
+    else status("playing preview — spotify handoff failed: " + m);
   }
 }
 
