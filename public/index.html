@@ -50,16 +50,23 @@
 
 <section id="setup" hidden>
   <div class="panel">
-    <h2>set up</h2>
+    <h2>make it yours</h2>
     <p>crate reads your Spotify library to learn your taste, then digs through open
     music graphs — not Spotify's promo machine — for things you haven't heard.
-    Finds save back to your Liked Songs and a <em>Crate finds</em> playlist.</p>
+    Finds save back to your Liked Songs and a playlist. Everything stays in
+    <em>your</em> browser: your library, your finds, your login. Nothing is shared.</p>
+
+    <p>Spotify caps shared apps at 5 users, so each person brings their own free
+    key — three minutes, one time, yours forever:</p>
 
     <ol>
       <li>open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noreferrer">developer.spotify.com/dashboard</a> and log in with your normal Spotify account</li>
       <li>Create app — name it anything. Redirect URI: <code id="ruri">http://127.0.0.1:8823/callback</code> — add it, tick <em>Web API</em>, save</li>
       <li>copy the Client ID from the app's settings and paste it here</li>
     </ol>
+
+    <p class="fine" style="margin-bottom:16px">invited by the site owner? skip all that —
+    paste the Client ID they gave you and hit Connect.</p>
 
     <div class="row"><label for="clientid">Spotify Client ID</label><input id="clientid" spellcheck="false"></div>
     <div class="row"><label for="pldest">♥ saves to Liked Songs, and also to</label><select id="pldest"><option value="crate">Crate finds (auto)</option><option value="none">liked songs only</option></select></div>
