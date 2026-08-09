@@ -17,6 +17,15 @@ save finds back) and gets everything else elsewhere.
 Double-click `crate.vbs` (hidden console) or `start.cmd` (visible console).
 Needs Node, no npm install.
 
+## Or deploy it (free, phone-friendly)
+
+Fork/import this repo on [Vercel](https://vercel.com/new) — zero config, it
+just deploys (static app + one serverless Deezer proxy). On the deployed site
+your store lives in the browser's localStorage and your Spotify tokens never
+leave the device. Add `https://<your-app>.vercel.app/callback` as a second
+Redirect URI in your Spotify dashboard app and connect from anywhere. Every
+push to `main` redeploys automatically.
+
 ## One-time setup (~3 minutes)
 
 1. Open <https://developer.spotify.com/dashboard>, log in with your normal
