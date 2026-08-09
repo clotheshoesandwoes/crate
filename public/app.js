@@ -3,8 +3,19 @@
 import { dig, digFromTrack, normKey, artistKey } from "./engine.js";
 
 const BASE = location.origin;
-const REDIRECT_URI = "http://127.0.0.1:8823/callback"; // Spotify allows loopback only
+// local install talks to server.js (file store); the deployed site keeps
+// everything in this browser's localStorage — tokens never leave the device
+const LOCAL = ["127.0.0.1", "localhost"].includes(location.hostname);
+const REDIRECT_URI = BASE + "/callback"; // must be registered in the Spotify dashboard
 const SCOPES = "user-library-read user-library-modify user-top-read playlist-read-private playlist-modify-private playlist-modify-public user-modify-playback-state user-read-playback-state";
+
+const DEFAULT_STORE = {
+  spotify: { clientId: "", tokens: null, userId: "", userName: "" },
+  lastfm: { apiKey: "" },
+  settings: { playlist: true, playlistId: null, hoverPlay: true },
+  profile: { builtAt: 0, newestAddedAt: "", count: 0, artists: {}, top: {}, lanes: null, trackKeys: [], isrcs: [], years: {} },
+  seen: {}, banned: {}, saved: {}, savedLocal: [], finds: [],
+};
 
 const $ = (sel) => document.querySelector(sel);
 // ?preview=1 — screenshot/test mode: dig freely but never scan, mark seen, or persist
@@ -40,7 +51,12 @@ const api = {
 };
 
 async function loadStore() {
-  store = await (await fetch("/api/store")).json();
+  if (LOCAL) {
+    store = await (await fetch("/api/store")).json();
+  } else {
+    try { store = JSON.parse(localStorage.getItem("crateStore")); } catch { store = null; }
+    if (!store) store = structuredClone(DEFAULT_STORE);
+  }
   store.profile.lanes = store.profile.lanes || null;
   store.finds = store.finds || [];
   if (!store.settings.playlistMode) store.settings.playlistMode = store.settings.playlist === false ? "none" : "crate";
@@ -58,7 +74,9 @@ let saveTimer = null;
 function persist(now = false) {
   if (PREVIEW) return;
   clearTimeout(saveTimer);
-  const doSave = () => fetch("/api/store", { method: "POST", body: JSON.stringify(store) });
+  const doSave = () => LOCAL
+    ? fetch("/api/store", { method: "POST", body: JSON.stringify(store) })
+    : Promise.resolve(localStorage.setItem("crateStore", JSON.stringify(store)));
   if (now) return doSave();
   saveTimer = setTimeout(doSave, 800);
 }
@@ -101,10 +119,6 @@ const b64url = (buf) =>
 
 async function login() {
   if (!store.spotify.clientId) { openSettings(); return; }
-  if (location.origin !== "http://127.0.0.1:8823") {
-    status("connect from the desktop (http://127.0.0.1:8823) — spotify only allows the loopback address");
-    return;
-  }
   const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
   localStorage.setItem("pkce_verifier", verifier);
   const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
@@ -736,6 +750,8 @@ async function populatePlaylistPicker() {
 function bindSettings() {
   $("#clientid").value = store.spotify.clientId || "";
   $("#opthover").checked = !!store.settings.hoverPlay;
+  const ruri = $("#ruri");
+  if (ruri) ruri.textContent = REDIRECT_URI;
 
   $("#savesetup").addEventListener("click", async () => {
     store.spotify.clientId = $("#clientid").value.trim();

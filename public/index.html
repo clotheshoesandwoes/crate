@@ -57,7 +57,7 @@
 
     <ol>
       <li>open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noreferrer">developer.spotify.com/dashboard</a> and log in with your normal Spotify account</li>
-      <li>Create app — name it anything. Redirect URI: <code>http://127.0.0.1:8823/callback</code> — add it, tick <em>Web API</em>, save</li>
+      <li>Create app — name it anything. Redirect URI: <code id="ruri">http://127.0.0.1:8823/callback</code> — add it, tick <em>Web API</em>, save</li>
       <li>copy the Client ID from the app's settings and paste it here</li>
     </ol>
 
@@ -80,7 +80,8 @@
     </div>
 
     <p class="fine">No Spotify yet? Type an artist in the top bar and dig — previews come from
-    open sources and work without an account. Everything is stored in <code>data\store.json</code> on this machine.</p>
+    open sources and work without an account. Everything — including your Spotify
+    connection — stays on this device.</p>
   </div>
 </section>
 
