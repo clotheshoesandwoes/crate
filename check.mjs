@@ -1,7 +1,7 @@
 // crate smoke test — spawns the server, hits live Deezer through the proxy,
 // runs the engine end-to-end for all three modes. No Spotify needed.
 import { spawn } from "node:child_process";
-import { dig, digFromTrack } from "./public/engine.js";
+import { dig, digFromTrack, digBridge, digDescent, digNeighbors } from "./public/engine.js";
 
 const PORT = 8824; // separate from the app so a running instance isn't disturbed
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -92,6 +92,22 @@ try {
   check("gems: enough tracks", rGems.tracks.length >= 8, `${rGems.tracks.length} tracks`);
   check("gems: respects year cap", rGems.tracks.every((t) => !t.year || t.year <= 2005),
     rGems.tracks.slice(0, 4).map((t) => `${t.artist} ${t.year}`).join(", "));
+
+  // the dive: fast neighborhood of one track
+  const rNb = await digNeighbors(api, { artist: "Burial", title: "Archangel", obscurity: 0.5, batchSize: 24, ...base });
+  check("dive: tracks", rNb.tracks.length >= 10, `${rNb.tracks.length} tracks`);
+  check("dive: provenance", rNb.tracks.every((t) => t.via && t.via.startsWith("near")));
+
+  // pathway: bridge between two artists
+  const rBr = await digBridge(api, { from: "Portishead", to: "Aphex Twin", obscurity: 0.5, batchSize: 30, ...base });
+  check("bridge: tracks", rBr.tracks.length >= 8, `${rBr.tracks.length} tracks`);
+  check("bridge: found a path", rBr.path.length >= 3, rBr.path.join(" > "));
+  check("bridge: provenance", rBr.tracks.every((t) => t.via));
+
+  // pathway: rabbit hole descends in fan count
+  const rHo = await digDescent(api, { seed: "Radiohead", obscurity: 0.6, batchSize: 30, ...base });
+  check("hole: tracks", rHo.tracks.length >= 8, `${rHo.tracks.length} tracks`);
+  check("hole: goes somewhere", rHo.path.length >= 4, `${rHo.path.length} stops: ${rHo.path.slice(0, 5).join(" > ")}…`);
 
   // engine, mode: deep (known artists only)
   const known = { boardsofcanada: 10, autechre: 6, "aphex twin": 8 };

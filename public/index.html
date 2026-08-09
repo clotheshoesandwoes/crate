@@ -19,6 +19,8 @@
       <button data-mode="new" class="on">new</button>
       <button data-mode="gems">old gems</button>
       <button data-mode="deep">deep cuts</button>
+      <button data-mode="bridge">bridge</button>
+      <button data-mode="hole">rabbit hole</button>
     </nav>
     <div class="right">
       <span id="acct"></span>
@@ -29,6 +31,7 @@
   <div class="bench">
     <input id="seed" type="text" placeholder="dig from an artist… (blank = your taste)" spellcheck="false">
     <button id="dig">dig</button>
+    <button id="backbtn" class="quiet" hidden>← back</button>
     <div class="dials">
       <label>familiar <input id="farout" type="range" min="0" max="100" value="40"> far out</label>
       <label>popular <input id="obscurity" type="range" min="0" max="100" value="55"> obscure</label>
@@ -66,8 +69,8 @@
       <li>copy the Client ID from the app's settings and paste it here</li>
     </ol>
 
-    <p class="fine" style="margin-bottom:16px">invited by the site owner? skip all that —
-    paste the Client ID they gave you and hit Connect.</p>
+    <p class="fine" style="margin-bottom:16px">invited by the site owner? skip all of it —
+    leave the field empty and just hit <em>Connect Spotify</em>.</p>
 
     <div class="row"><label for="clientid">Spotify Client ID</label><input id="clientid" spellcheck="false"></div>
     <div class="row"><label for="pldest">♥ saves to Liked Songs, and also to</label><select id="pldest"><option value="crate">Crate finds (auto)</option><option value="none">liked songs only</option></select></div>

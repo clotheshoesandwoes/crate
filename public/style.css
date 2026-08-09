@@ -412,7 +412,12 @@ button.quiet:hover { color: var(--fg); text-decoration-color: var(--fg); }
 }
 
 @media (max-width: 900px) {
-  .mast { gap: 20px; padding: 16px 20px 0; }
+  .mast { gap: 14px 20px; padding: 16px 20px 0; flex-wrap: wrap; }
+  /* a flex item never shrinks below content width on its own — force the
+     wide rows onto their own full-width lines so their insides can wrap */
+  #modes { flex: 1 1 100%; min-width: 0; order: 3; gap: 4px 18px; flex-wrap: wrap; }
+  .bench > * { min-width: 0; }
+  .dials { flex: 1 1 100%; gap: 10px 18px; }
   .bench { padding: 12px 20px 14px; gap: 12px 18px; }
   #seed { width: 200px; }
   #status { padding: 10px 20px 0; }

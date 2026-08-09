@@ -85,6 +85,36 @@ async function lastfmSimilarTracks(api, artist, title) {
   }
 }
 
+// an artist's catalog past their biggest songs — the shared "not the hits" picker
+async function midCatalogTracks(api, artist, via, obscurity, n) {
+  const j = await api.dz(`artist/${artist.id}/top?limit=50`);
+  const all = j?.data || [];
+  const dropHits = 2 + Math.round(obscurity * 8);
+  const byPop = [...all].sort((a, b) => (b.rank || 0) - (a.rank || 0));
+  let eligible = byPop.slice(Math.min(dropHits, Math.max(0, byPop.length - 5)));
+  if (!eligible.length) eligible = all;
+  return pickWeighted(
+    eligible,
+    (t) => (obscurity > 0.4 ? 1 / Math.log10((t.rank || 100000) + 10) : jitter()),
+    n
+  ).map((t) => fromDeezerTrack(t, artist, { via }));
+}
+
+// path modes keep their order — filter without the diversify shuffle
+function orderedFilter(found, hasTrack, isSeen, batchSize) {
+  const keys = new Set();
+  const out = [];
+  for (const t of found) {
+    if (!t || !t.preview) continue;
+    const key = normKey(t.artist, t.title);
+    if (keys.has(key) || hasTrack(key, t.isrc) || isSeen(key)) continue;
+    keys.add(key);
+    out.push({ ...t, key });
+    if (out.length >= batchSize) break;
+  }
+  return out;
+}
+
 function fromDeezerTrack(t, fallbackArtist, extra = {}) {
   if (!t) return null;
   return {
@@ -204,7 +234,10 @@ export async function dig(api, opts) {
     candidates = fresh.length ? fresh : candidates;
   } else if (mode === "deep") {
     const k = candidates.filter((p) => known(p) >= 2);
-    candidates = k.length ? k : candidates;
+    // never fall back to strangers in deep mode — the seeds themselves are
+    // in the pool and known; digging them alone beats breaking the promise
+    const seedsOnly = candidates.filter((p) => seedArtists.some((s) => s.id === p.artist.id));
+    candidates = k.length ? k : (seedsOnly.length ? seedsOnly : candidates);
   }
   let inBudget = candidates.filter((p) => (p.artist.nb_fan || 0) <= maxFans);
   if (inBudget.length < 4) inBudget = candidates; // don't starve on tiny scenes
@@ -213,35 +246,26 @@ export async function dig(api, opts) {
   const chosen = pickWeighted(
     candidates,
     (p) => (artistPenalty(artistKey(p.artist.name)) * jitter()) / Math.log10((p.artist.nb_fan || 100) + 10),
-    Math.min(mode === "new" ? 22 : 9, candidates.length)
+    Math.min(mode === "new" ? 22 : mode === "gems" ? 14 : 9, candidates.length)
   );
   log(`${chosen.length} artists in the crate`);
 
   // 4. collect tracks
   const found = [];
-  const dropHits = 2 + Math.round(obscurity * 8); // skip each artist's biggest songs
 
-  for (const { artist, via } of chosen) {
+  const collectFrom = async (artist, via) => {
     try {
       if (mode === "new") {
-        // mid-catalog sampling, not the hits
-        const j = await api.dz(`artist/${artist.id}/top?limit=50`);
-        const all = j?.data || [];
-        const byPop = [...all].sort((a, b) => (b.rank || 0) - (a.rank || 0));
-        let eligible = byPop.slice(Math.min(dropHits, Math.max(0, byPop.length - 5)));
-        if (!eligible.length) eligible = all;
-        for (const t of pickWeighted(eligible, (tt) => (obscurity > 0.4 ? 1 / Math.log10((tt.rank || 100000) + 10) : jitter()), 2)) {
-          found.push(fromDeezerTrack(t, artist, { via }));
-        }
+        found.push(...(await midCatalogTracks(api, artist, via, obscurity, 2)));
       } else {
         // gems / deep: go through albums so we get release years + non-hits
         const j = await api.dz(`artist/${artist.id}/albums?limit=100`);
         let albums = (j?.data || []).filter((al) => al.record_type === "album" || al.record_type === "ep");
         if (mode === "gems" && yearCap) albums = albums.filter((al) => (yearOf(al.release_date) || 9999) <= yearCap);
-        if (!albums.length) continue;
+        if (!albums.length) return;
         const picks = pickWeighted(albums, (al) => {
           const y = yearOf(al.release_date) || 2020;
-          return mode === "gems" ? 1 + (2030 - y) / 20 : jitter();
+          return mode === "gems" ? 1 + (2030 - y) / 8 : jitter(); // lean properly old
         }, 2);
         for (const al of picks) {
           const alj = await api.dz(`album/${al.id}`);
@@ -263,11 +287,28 @@ export async function dig(api, opts) {
     } catch (e) {
       log(`skipping ${artist.name}: ${e.message || e}`);
     }
+  };
+
+  for (const { artist, via } of chosen) await collectFrom(artist, via);
+
+  // old catalogs are sparse in most graph neighborhoods — a thin gems dig
+  // widens to more artists instead of returning six tracks
+  if (mode === "gems" && found.length < 24) {
+    const used = new Set(chosen.map((c) => c.artist.id));
+    const extra = candidates.filter((p) => !used.has(p.artist.id)).slice(0, 10);
+    if (extra.length) log(`thin year range — widening to ${extra.length} more artists`);
+    for (const { artist, via } of extra) await collectFrom(artist, via);
   }
 
   // 5-6. filter + diversify: a wall of distinct artists in "new" mode
   const caps = mode === "new" ? { maxPerArtist: 1, maxPerAlbum: 1 } : { maxPerArtist: 3, maxPerAlbum: 2 };
-  const batch = finalize(found, { mode, yearCap, hasTrack, isSeen, obscurity, batchSize, ...caps });
+  let batch = finalize(found, { mode, yearCap, hasTrack, isSeen, obscurity, batchSize, ...caps });
+  if (mode === "deep") {
+    // collab tracks on a known artist's album carry a stranger's credit —
+    // drop them unless doing so would gut the batch
+    const knownOnly = batch.filter((t) => isKnownArtist(artistKey(t.artist)) >= 2);
+    if (knownOnly.length >= 12 || knownOnly.length >= batch.length * 0.7) batch = knownOnly;
+  }
   return { tracks: batch, seeds: seedArtists.map((a) => a.name) };
 }
 
@@ -304,4 +345,149 @@ export async function digFromTrack(api, opts) {
     out = out.concat(sub.tracks.filter((t) => !have.has(t.key)));
   }
   return { tracks: out.slice(0, batchSize), seeds: [`${artist} — ${title}`] };
+}
+
+// the dive: fast neighborhood of one track — its maker's corner of the graph,
+// mid-catalog cuts, built for click-play-click chains (~10 calls, cache-warm)
+export async function digNeighbors(api, opts) {
+  const {
+    artist, title = "", obscurity = 0.5,
+    hasTrack = () => false, isSeen = () => false, batchSize = 24, log = () => {},
+  } = opts;
+  const A = await resolveArtist(api, artist);
+  if (!A) return { tracks: [], seeds: [artist] };
+  const rel = await relatedArtists(api, A.id, 15);
+  const near = pickWeighted(rel, (r) => 1 / Math.log10((r.nb_fan || 100) + 10), Math.min(9, rel.length));
+  const via = title ? `near ${title}` : `near ${A.name}`;
+  const found = [];
+  try { found.push(...(await midCatalogTracks(api, A, via, obscurity, 2))); } catch {}
+  for (const n of near) {
+    try { found.push(...(await midCatalogTracks(api, n, via, obscurity, 2))); } catch {}
+  }
+  return {
+    tracks: finalize(found, { hasTrack, isSeen, obscurity, batchSize, maxPerArtist: 2, maxPerAlbum: 1 }),
+    seeds: [A.name],
+  };
+}
+
+// pathway: a chain of songs stepping from one artist to another through the
+// related-artists graph. Bidirectional beam search finds the stepping stones,
+// then each stone contributes a mid-catalog cut, in path order.
+export async function digBridge(api, opts) {
+  const {
+    from, to, obscurity = 0.5,
+    hasTrack = () => false, isSeen = () => false, batchSize = 40, log = () => {},
+  } = opts;
+  const A = await resolveArtist(api, from);
+  const B = await resolveArtist(api, to);
+  if (!A || !B) return { tracks: [], seeds: [], path: [] };
+  if (A.id === B.id) {
+    const only = await midCatalogTracks(api, A, A.name, obscurity, batchSize);
+    return { tracks: orderedFilter(only, hasTrack, isSeen, batchSize), seeds: [A.name], path: [A.name] };
+  }
+  log(`bridging ${A.name} → ${B.name}…`);
+
+  const parentA = new Map([[A.id, 0]]);
+  const parentB = new Map([[B.id, 0]]);
+  const info = new Map([[A.id, A], [B.id, B]]);
+  let frontA = [A], frontB = [B], meetId = null;
+
+  outer:
+  for (let depth = 0; depth < 3; depth++) {
+    for (const side of ["A", "B"]) {
+      const [front, mine, theirs] = side === "A" ? [frontA, parentA, parentB] : [frontB, parentB, parentA];
+      const next = [];
+      for (const node of front) {
+        const rel = await relatedArtists(api, node.id, 20);
+        for (const r of rel) {
+          if (!mine.has(r.id)) {
+            mine.set(r.id, node.id);
+            info.set(r.id, r);
+            next.push(r);
+          }
+          if (theirs.has(r.id)) { meetId = r.id; break outer; }
+        }
+      }
+      const beam = pickWeighted(next, (r) => 1 / Math.log10((r.nb_fan || 100) + 10), Math.min(6, next.length));
+      if (side === "A") frontA = beam; else frontB = beam;
+    }
+  }
+
+  if (meetId == null) {
+    // shores never met — mix a dig from each end instead of failing
+    log("no clean path found — mixing both shores");
+    const half = Math.floor(batchSize / 2);
+    const shoreA = await dig(api, { mode: "new", seeds: [A.name], obscurity, hasTrack, isSeen, batchSize: half, log });
+    const shoreB = await dig(api, { mode: "new", seeds: [B.name], obscurity, hasTrack, isSeen, batchSize: half, log });
+    const mixed = [];
+    for (let i = 0; i < Math.max(shoreA.tracks.length, shoreB.tracks.length); i++) {
+      if (shoreA.tracks[i]) mixed.push(shoreA.tracks[i]);
+      if (shoreB.tracks[i]) mixed.push(shoreB.tracks[i]);
+    }
+    return { tracks: mixed.slice(0, batchSize), seeds: [A.name, B.name], path: [] };
+  }
+
+  const leftIds = [];
+  for (let id = meetId; id; id = parentA.get(id)) leftIds.unshift(id);
+  const rightIds = [];
+  for (let id = parentB.get(meetId); id; id = parentB.get(id)) rightIds.push(id);
+  const pathArtists = [...leftIds, ...rightIds].map((id) => info.get(id)).filter(Boolean);
+
+  const label = `${A.name} → ${B.name}`;
+  const per = pathArtists.length > 6 ? 2 : 3;
+  const found = [];
+  for (let i = 0; i < pathArtists.length; i++) {
+    try {
+      found.push(...(await midCatalogTracks(
+        api, pathArtists[i],
+        `bridge ${i + 1}/${pathArtists.length}: ${label}`, obscurity, per)));
+    } catch {}
+  }
+  return {
+    tracks: orderedFilter(found, hasTrack, isSeen, batchSize),
+    seeds: [A.name, B.name],
+    path: pathArtists.map((a) => a.name),
+  };
+}
+
+// pathway: a rabbit hole — every step strictly less famous than the last,
+// until the graph runs out of smaller rooms.
+export async function digDescent(api, opts) {
+  const {
+    seed, obscurity = 0.6, hops = 9,
+    hasTrack = () => false, isSeen = () => false, batchSize = 40, log = () => {},
+  } = opts;
+  let cur = await resolveArtist(api, seed);
+  if (!cur) return { tracks: [], seeds: [], path: [] };
+  log(`descending from ${cur.name}…`);
+
+  const visited = new Set([cur.id]);
+  const chain = [cur];
+  let ceiling = cur.nb_fan || 1e6;
+  for (let d = 0; d < hops; d++) {
+    const rel = (await relatedArtists(api, cur.id, 25))
+      .filter((r) => !visited.has(r.id) && (r.nb_fan || 0) > 0);
+    let lower = rel.filter((r) => r.nb_fan < ceiling * 0.8);
+    if (!lower.length) lower = rel.filter((r) => r.nb_fan < ceiling);
+    if (!lower.length) break;
+    cur = pickWeighted(lower, (r) => 1 / Math.log10(r.nb_fan + 10), 1)[0];
+    visited.add(cur.id);
+    ceiling = cur.nb_fan;
+    chain.push(cur);
+  }
+
+  const fansLabel = (a) =>
+    (a.nb_fan || 0) >= 1000 ? Math.round(a.nb_fan / 1000) + "k fans" : (a.nb_fan || "?") + " fans";
+  const found = [];
+  for (let i = 0; i < chain.length; i++) {
+    try {
+      found.push(...(await midCatalogTracks(
+        api, chain[i], `depth ${i} · ${fansLabel(chain[i])}`, obscurity, 2)));
+    } catch {}
+  }
+  return {
+    tracks: orderedFilter(found, hasTrack, isSeen, batchSize),
+    seeds: [chain[0].name],
+    path: chain.map((a) => a.name),
+  };
 }

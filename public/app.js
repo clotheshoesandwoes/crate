@@ -1,12 +1,15 @@
 // crate — client app: Spotify auth + library profile, taste lanes, dig UI,
 // previews, drift, save/queue-back to Spotify.
-import { dig, digFromTrack, normKey, artistKey } from "./engine.js";
+import { dig, digFromTrack, digBridge, digDescent, digNeighbors, normKey, artistKey } from "./engine.js";
 
 const BASE = location.origin;
 // local install talks to server.js (file store); the deployed site keeps
 // everything in this browser's localStorage — tokens never leave the device
 const LOCAL = ["127.0.0.1", "localhost"].includes(location.hostname);
 const REDIRECT_URI = BASE + "/callback"; // must be registered in the Spotify dashboard
+// The site's default app id (a public identifier — PKCE apps always ship it).
+// Invited listeners just hit Connect; anyone else can paste their own in settings.
+const DEFAULT_CLIENT_ID = "cfdc9a965ad34cc1bba6c2db96404638";
 const SCOPES = "user-library-read user-library-modify user-top-read playlist-read-private playlist-modify-private playlist-modify-public user-modify-playback-state user-read-playback-state";
 
 const DEFAULT_STORE = {
@@ -118,7 +121,10 @@ const b64url = (buf) =>
   btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
 async function login() {
-  if (!store.spotify.clientId) { openSettings(); return; }
+  if (!store.spotify.clientId) {
+    store.spotify.clientId = DEFAULT_CLIENT_ID;
+    persist();
+  }
   const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
   localStorage.setItem("pkce_verifier", verifier);
   const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
@@ -366,6 +372,8 @@ async function runDig(append = false, seedOverride = null, note = "") {
   if (digging) return;
   const mode = $("#modes .on").dataset.mode;
   const manual = seedOverride || $("#seed").value.trim();
+  if (mode === "bridge") return runPath("bridge", manual);
+  if (mode === "hole") return runPath("hole", manual);
   let seeds = manual ? manual.split(",").map((s) => s.trim()).filter(Boolean) : sampleSeeds(mode, sliderVal("farout"));
   if (!seeds.length) {
     status("connect spotify (settings) or type an artist to dig from");
@@ -405,6 +413,144 @@ async function runDig(append = false, seedOverride = null, note = "") {
   } catch (e) {
     $("#grid .digging")?.remove();
     status("dig failed — " + (e.message || e));
+  }
+  digging = false;
+  $("#dig").disabled = false;
+}
+
+// pathways: bridge (artist > artist) and rabbit hole (ever more obscure)
+function laneTopArtist(laneName, exclude) {
+  const lane = store.profile.lanes?.[laneName];
+  if (!lane) return null;
+  const ranked = Object.entries(lane).sort((a, b) => b[1] - a[1]);
+  const hit = ranked.find(([k]) => k !== exclude);
+  return hit ? hit[0] : null;
+}
+
+async function runPath(kind, manual) {
+  if (digging) return;
+  let from = null, to = null, seed = null;
+  if (kind === "bridge") {
+    const parts = manual ? manual.split(/\s*(?:>|->|→)\s*|\s+to\s+/i).map((s) => s.trim()).filter(Boolean) : [];
+    if (parts.length >= 2) {
+      [from, to] = parts;
+    } else if (store.profile.lanes && Object.keys(store.profile.lanes).length >= 2) {
+      // blank = bridge across your own map: top artists of two strongest lanes
+      const lanes = Object.entries(store.profile.lanes)
+        .map(([name, artists]) => [name, Object.values(artists).reduce((a, b) => a + b, 0)])
+        .sort((a, b) => b[1] - a[1]);
+      from = laneTopArtist(lanes[0][0]);
+      to = laneTopArtist(lanes[1][0], from);
+    }
+    if (!from || !to) {
+      status("bridge needs two ends — type: artist > artist");
+      return;
+    }
+  } else {
+    seed = manual || sampleSeeds("new", 0.3)[0];
+    if (!seed) {
+      status("type an artist to descend from, or connect spotify");
+      return;
+    }
+  }
+  digging = true;
+  $("#dig").disabled = true;
+  batch = [];
+  playedIdx.clear();
+  $("#grid").innerHTML = "";
+  stopAudio();
+  showDiggingPlaceholder();
+  try {
+    const res = kind === "bridge"
+      ? await digBridge(api, { from, to, obscurity: sliderVal("obscurity"), batchSize: 40, log: status, ...digCallbacks() })
+      : await digDescent(api, { seed, obscurity: sliderVal("obscurity"), batchSize: 40, log: status, ...digCallbacks() });
+    $("#grid .digging")?.remove();
+    if (!PREVIEW) {
+      const now = Date.now();
+      for (const t of res.tracks) if (!store.seen[t.key]) store.seen[t.key] = now;
+      persist();
+    }
+    batch = res.tracks;
+    renderTracks(res.tracks, 0);
+    if (!res.tracks.length) {
+      status("came up empty — try different ends or ease the obscurity dial");
+    } else if (kind === "bridge") {
+      status(res.path.length
+        ? `bridge: ${res.path.join(" → ")}`
+        : `no clean path — mixed digs from ${res.seeds.join(" and ")}`);
+    } else {
+      status(`rabbit hole: ${res.path.join(" → ")}`);
+    }
+  } catch (e) {
+    $("#grid .digging")?.remove();
+    status("path failed — " + (e.message || e));
+  }
+  digging = false;
+  $("#dig").disabled = false;
+}
+
+// the dive: click a cover → it plays AND the wall becomes its neighborhood.
+// The playing track pins itself as tile 0; ← back climbs out.
+const batchHistory = [];
+function renderBack() {
+  const b = $("#backbtn");
+  if (b) b.hidden = !batchHistory.length;
+}
+function goBack() {
+  const prev = batchHistory.pop();
+  if (!prev) return;
+  stopAudio();
+  batch = prev;
+  playedIdx.clear();
+  $("#grid").innerHTML = "";
+  renderTracks(prev, 0);
+  renderBack();
+  status(`${prev.length} finds · stepped back`);
+}
+
+async function diveFromTile(idx) {
+  const t = batch[idx];
+  if (!t) return;
+  playIdx(idx); // sound first, always — the dive loads underneath it
+  if (digging) return;
+  digging = true;
+  $("#dig").disabled = true;
+  status(`finding songs near “${t.title}”…`);
+  try {
+    const res = await digNeighbors(api, {
+      artist: t.artist,
+      title: t.title,
+      obscurity: sliderVal("obscurity"),
+      batchSize: 24,
+      log: () => {},
+      ...digCallbacks(),
+    });
+    const pinned = { ...t };
+    const rest = res.tracks.filter((n) => n.key !== pinned.key);
+    if (rest.length) {
+      if (batch.length) {
+        batchHistory.push(batch);
+        if (batchHistory.length > 6) batchHistory.shift();
+      }
+      batch = [pinned, ...rest];
+      playedIdx.clear();
+      playedIdx.add(0);
+      currentIdx = 0;
+      $("#grid").innerHTML = "";
+      renderTracks(batch, 0);
+      tileFor(0)?.classList.add("playing");
+      if (!PREVIEW) {
+        const now = Date.now();
+        for (const n of rest) if (!store.seen[n.key]) store.seen[n.key] = now;
+        persist();
+      }
+      renderBack();
+      status(`${batch.length} songs near ${t.artist} — click any cover to keep diving`);
+    } else {
+      status(`nothing new near ${t.artist} right now — ⤵ tunnels deeper`);
+    }
+  } catch (e) {
+    status("dive failed — " + (e.message || e));
   }
   digging = false;
   $("#dig").disabled = false;
@@ -488,7 +634,7 @@ function renderTracks(tracks, startIdx) {
     grid.append(tile);
     seenIO?.observe(tile);
 
-    img.addEventListener("click", () => (currentIdx === idx && !audio.paused ? pauseAudio() : playIdx(idx)));
+    img.addEventListener("click", () => (currentIdx === idx && !audio.paused ? pauseAudio() : diveFromTile(idx)));
     img.addEventListener("mouseenter", () => {
       // hover only ever previews — full plays are deliberate taps
       if (store.settings.hoverPlay && userInteracted && !$("#fullplay")?.checked) playIdx(idx);
@@ -933,13 +1079,19 @@ async function makePlaylistFromFinds() {
 function sliderVal(id) { return parseInt($("#" + id).value, 10) / 100; }
 
 function bindControls() {
-  $("#dig").addEventListener("click", () => runDig(false));
-  $("#seed").addEventListener("keydown", (e) => { if (e.key === "Enter") runDig(false); });
+  $("#dig").addEventListener("click", () => { batchHistory.length = 0; renderBack(); runDig(false); });
+  $("#backbtn")?.addEventListener("click", goBack);
+  $("#seed").addEventListener("keydown", (e) => { if (e.key === "Enter") { batchHistory.length = 0; renderBack(); runDig(false); } });
+  const PLACEHOLDERS = {
+    bridge: "artist > artist (blank = across your lanes)",
+    hole: "start artist… (blank = your taste)",
+  };
   for (const b of $("#modes").querySelectorAll("button")) {
     b.addEventListener("click", () => {
       $("#modes .on")?.classList.remove("on");
       b.classList.add("on");
       $("#yearwrap").hidden = b.dataset.mode !== "gems";
+      $("#seed").placeholder = PLACEHOLDERS[b.dataset.mode] || "dig from an artist… (blank = your taste)";
     });
   }
   $("#gear").addEventListener("click", () => ($("#setup").hidden ? openSettings() : closeSettings()));
