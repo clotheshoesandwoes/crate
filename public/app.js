@@ -1092,7 +1092,15 @@ function bindControls() {
       b.classList.add("on");
       $("#yearwrap").hidden = b.dataset.mode !== "gems";
       $("#seed").placeholder = PLACEHOLDERS[b.dataset.mode] || "dig from an artist… (blank = your taste)";
+      // the controls ARE the view: switching mode reshapes the wall right now
+      batchHistory.length = 0;
+      renderBack();
+      runDig(false);
     });
+  }
+  // …and so does releasing a dial or changing the year cap
+  for (const id of ["farout", "obscurity", "yearcap"]) {
+    $("#" + id)?.addEventListener("change", () => runDig(false));
   }
   $("#gear").addEventListener("click", () => ($("#setup").hidden ? openSettings() : closeSettings()));
   const fp = $("#fullplay");
