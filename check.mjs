@@ -1,7 +1,9 @@
 // crate smoke test — spawns the server, hits live Deezer through the proxy,
 // runs the engine end-to-end for all three modes. No Spotify needed.
 import { spawn } from "node:child_process";
-import { dig, digFromTrack, digBridge, digDescent, digNeighbors } from "./public/engine.js";
+import {
+  dig, digFromTrack, digBridge, digDescent, digNeighbors, songPanel, buildPlaylist,
+} from "./public/engine.js";
 
 const PORT = 8824; // separate from the app so a running instance isn't disturbed
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -97,6 +99,25 @@ try {
   const rNb = await digNeighbors(api, { artist: "Burial", title: "Archangel", obscurity: 0.5, batchSize: 24, ...base });
   check("dive: tracks", rNb.tracks.length >= 10, `${rNb.tracks.length} tracks`);
   check("dive: provenance", rNb.tracks.every((t) => t.via && t.via.startsWith("near")));
+
+  // detail panel: the 1-2-3
+  const pan = await songPanel(api, { artist: "Burial", title: "Archangel", obscurity: 0.5, ...base });
+  check("panel: artist card", !!pan?.artist?.name && pan.artist.nb_fan > 0,
+    `${pan?.artist?.name} · ${pan?.artist?.nb_fan?.toLocaleString()} fans · ${pan?.artist?.nb_album} releases`);
+  check("panel: top tracks playable", pan.top.length >= 5 && pan.top.every((t) => t.preview), `${pan.top.length} tracks`);
+  check("panel: related artists", pan.related.length >= 6, pan.related.slice(0, 3).map((r) => r.name).join(", "));
+  check("panel: songs like this", pan.similar.length >= 6, `${pan.similar.length} songs`);
+
+  // playlists: short / medium / long
+  for (const size of [12, 25]) {
+    const set = await buildPlaylist(api, { artist: "Portishead", title: "Glory Box", size, obscurity: 0.5, ...base });
+    const cap = size <= 12 ? 1 : 2;
+    const per = {};
+    set.tracks.forEach((t) => (per[t.artist] = (per[t.artist] || 0) + 1));
+    check(`set ${size}: length`, set.tracks.length >= size * 0.8, `${set.tracks.length}/${size}`);
+    check(`set ${size}: artist cap`, Math.max(...Object.values(per)) <= cap, `max ${Math.max(...Object.values(per))} per artist`);
+    check(`set ${size}: journey order`, /where it starts/.test(set.tracks[0]?.via || ""), set.tracks[0]?.via);
+  }
 
   // pathway: bridge between two artists
   const rBr = await digBridge(api, { from: "Portishead", to: "Aphex Twin", obscurity: 0.5, batchSize: 30, ...base });

@@ -175,6 +175,114 @@ button.quiet:hover { color: var(--fg); text-decoration-color: var(--fg); }
   padding: 48px 0 70px;
 }
 
+#status { display: inline-block; padding: 12px 10px 0 30px; }
+#statusact[hidden] { display: none; }
+#statusact { padding-top: 12px; font-size: 12px; }
+
+/* ---------- detail panel ---------- */
+#panel[hidden] { display: none; }
+#panel {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: 430px;
+  overflow-y: auto;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  padding: 18px 24px 100px;
+  z-index: 20;
+}
+#panelclose { float: right; }
+.pcard { padding: 18px 0; border-bottom: 1px solid var(--line); }
+.pcard:last-child { border-bottom: none; }
+.pcard h4 {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--mut);
+  margin: 20px 0 12px;
+}
+.pcard h4:first-child { margin-top: 0; }
+.ploading { color: var(--mut); font-size: 12px; }
+
+.pbigart { width: 100%; aspect-ratio: 1; object-fit: cover; background: var(--bg); cursor: pointer; }
+.ptitle { font-size: 17px; font-weight: 700; letter-spacing: -0.02em; margin-top: 14px; }
+.psub { font-size: 13px; color: var(--mut); margin-top: 3px; }
+.pvia { font-size: 11px; color: var(--mut); margin-top: 8px; }
+
+.pacts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.pacts button {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  padding: 7px 13px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.pacts button:hover { border-color: var(--fg); }
+.pacts button.done { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.pacts button.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); font-weight: 500; }
+
+.partist { display: flex; align-items: center; gap: 14px; }
+.partist img { width: 64px; height: 64px; object-fit: cover; background: var(--bg); }
+.partist .pname { font-size: 15px; font-weight: 500; letter-spacing: -0.01em; }
+.partist .pfans { font-size: 12px; color: var(--mut); margin-top: 2px; }
+
+.prow { display: flex; gap: 9px; overflow-x: auto; padding-bottom: 4px; margin-top: 6px; }
+.prow img { width: 62px; height: 62px; object-fit: cover; background: var(--bg); cursor: pointer; flex: none; }
+.prow img:hover { outline: 2px solid var(--fg); outline-offset: -2px; }
+
+.prelated { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px 10px; }
+.prelated figure { cursor: pointer; }
+.prelated img { width: 100%; aspect-ratio: 1; object-fit: cover; background: var(--bg); }
+.prelated figure:hover img { outline: 2px solid var(--fg); outline-offset: -2px; }
+.prelated figcaption {
+  font-size: 11px;
+  color: var(--mut);
+  margin-top: 5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.psong {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+.psong:last-child { border-bottom: none; }
+.psong img { width: 42px; height: 42px; object-fit: cover; background: var(--bg); flex: none; }
+.psong .pmeta { min-width: 0; flex: 1; }
+.psong .pt { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.psong .pa { font-size: 12px; color: var(--mut); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.psong .plove {
+  flex: none;
+  width: 28px; height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg);
+  cursor: pointer;
+  font-size: 12px;
+}
+.psong .plove:hover { border-color: var(--fg); }
+.psong .plove.done { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+
+.pset { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pset span { font-size: 12px; color: var(--mut); }
+.pset button {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.pset button:hover { border-color: var(--fg); }
+
+@media (max-width: 900px) {
+  #panel { width: auto; left: 0; border-left: none; padding: 16px 20px 110px; }
+  .prelated { grid-template-columns: repeat(3, 1fr); }
+}
+
 /* ---------- setup panel ---------- */
 #setup { padding: 28px 30px; }
 .panel {

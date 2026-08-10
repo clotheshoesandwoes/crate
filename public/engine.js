@@ -347,6 +347,94 @@ export async function digFromTrack(api, opts) {
   return { tracks: out.slice(0, batchSize), seeds: [`${artist} — ${title}`] };
 }
 
+// everything the detail panel shows for one track: who made it, what else
+// they made, who sits next to them, and songs from that neighbourhood.
+export async function songPanel(api, opts) {
+  const {
+    artist, title = "", obscurity = 0.5,
+    hasTrack = () => false, isSeen = () => false, batchSize = 12, log = () => {},
+  } = opts;
+  const A = await resolveArtist(api, artist);
+  if (!A) return null;
+  const topJson = await api.dz(`artist/${A.id}/top?limit=12`);
+  const related = await relatedArtists(api, A.id, 12);
+  const top = (topJson?.data || [])
+    .map((t) => fromDeezerTrack(t, A, { via: `${A.name} · top track` }))
+    .filter((t) => t && t.preview)
+    .map((t) => ({ ...t, key: normKey(t.artist, t.title) }));
+
+  const near = pickWeighted(related, (r) => 1 / Math.log10((r.nb_fan || 100) + 10),
+                            Math.min(8, related.length));
+  const found = [];
+  for (const n of near) {
+    try {
+      found.push(...(await midCatalogTracks(api, n, title ? `near ${title}` : `near ${A.name}`,
+                                            obscurity, 2)));
+    } catch {}
+  }
+  const similar = finalize(found, {
+    hasTrack, isSeen, obscurity, batchSize, maxPerArtist: 1, maxPerAlbum: 1,
+  });
+  return { artist: A, top, related, similar };
+}
+
+// A set built as a journey: opens on the song you liked, then walks outward —
+// the seed's own catalog, then its neighbours, then their neighbours.
+export async function buildPlaylist(api, opts) {
+  const {
+    artist, title = "", size = 25, obscurity = 0.5,
+    hasTrack = () => false, isSeen = () => false, log = () => {},
+  } = opts;
+  const A = await resolveArtist(api, artist);
+  if (!A) return { tracks: [], seeds: [], name: "" };
+  log(`building ${size} songs outward from ${A.name}…`);
+
+  const rel = await relatedArtists(api, A.id, 25);
+  const near = pickWeighted(rel, (r) => 1 / Math.log10((r.nb_fan || 100) + 10),
+                            Math.min(size, rel.length, 20));
+  let farPick = [];
+  if (size > 20) {
+    const far = [];
+    for (const r of near.slice(0, 5)) {
+      try { far.push(...(await relatedArtists(api, r.id, 12))); } catch {}
+    }
+    const fresh = far.filter((f) => f.id !== A.id && !near.some((n) => n.id === f.id));
+    farPick = fresh.length
+      ? pickWeighted(fresh, (r) => 1 / Math.log10((r.nb_fan || 100) + 10),
+                     Math.min(size, fresh.length, 18))
+      : [];
+  }
+
+  const legs = [];
+  const walk = async (list, viaLabel, per) => {
+    for (const a of list) {
+      if (legs.length > size * 2.5) return;
+      try { legs.push(...(await midCatalogTracks(api, a, viaLabel, obscurity, per))); } catch {}
+    }
+  };
+  await walk([A], `${A.name} — where it starts`, 3);
+  await walk(near, `near ${A.name}`, 2);
+  if (farPick.length) await walk(farPick, "further out", 1);
+
+  // legs are already in journey order (seed → near → far); keep that and just
+  // stop any one artist from crowding the set
+  const perArtist = size <= 12 ? 1 : size <= 25 ? 2 : 3;
+  const counts = {};
+  const out = [];
+  for (const t of orderedFilter(legs, hasTrack, isSeen, size * 4)) {
+    const k = artistKey(t.artist);
+    counts[k] = (counts[k] || 0) + 1;
+    if (counts[k] > perArtist) continue;
+    out.push(t);
+    if (out.length >= size) break;
+  }
+  return {
+    tracks: out,
+    seeds: [A.name],
+    name: title ? `crate · out from ${title}` : `crate · out from ${A.name}`,
+  };
+}
+
 // the dive: fast neighborhood of one track — its maker's corner of the graph,
 // mid-catalog cuts, built for click-play-click chains (~10 calls, cache-warm)
 export async function digNeighbors(api, opts) {

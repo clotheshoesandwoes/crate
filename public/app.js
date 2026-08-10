@@ -1,6 +1,9 @@
 // crate — client app: Spotify auth + library profile, taste lanes, dig UI,
 // previews, drift, save/queue-back to Spotify.
-import { dig, digFromTrack, digBridge, digDescent, digNeighbors, normKey, artistKey } from "./engine.js";
+import {
+  dig, digFromTrack, digBridge, digDescent, digNeighbors,
+  songPanel, buildPlaylist, normKey, artistKey,
+} from "./engine.js";
 
 const BASE = location.origin;
 // local install talks to server.js (file store); the deployed site keeps
@@ -86,6 +89,21 @@ function persist(now = false) {
 
 function status(msg) {
   $("#status").textContent = msg || "";
+  hideStatusAction();
+}
+
+// one contextual button beside the status line ("save this set to spotify")
+let statusActFn = null;
+function showStatusAction(label, fn) {
+  const b = $("#statusact");
+  if (!b) return;
+  b.textContent = label;
+  b.hidden = false;
+  statusActFn = fn;
+}
+function hideStatusAction() {
+  const b = $("#statusact");
+  if (b) { b.hidden = true; statusActFn = null; }
 }
 
 // ---------- learned dislike: repeated bans of an artist bury the branch ----------
@@ -383,6 +401,7 @@ async function runDig(append = false, seedOverride = null, note = "") {
   digging = true;
   $("#dig").disabled = true;
   if (!append) {
+    closePanel();
     batch = [];
     playedIdx.clear();
     $("#grid").innerHTML = "";
@@ -556,6 +575,241 @@ async function diveFromTile(idx) {
   $("#dig").disabled = false;
 }
 
+// ---------- detail panel: the song, its maker, its neighbourhood ----------
+let panelSeq = 0;
+function closePanel() { $("#panel").hidden = true; }
+
+async function openPanel(idx) {
+  const t = batch[idx];
+  if (!t) return;
+  const seq = ++panelSeq;
+  const panel = $("#panel");
+  panel.hidden = false;
+  panel.scrollTop = 0;
+  renderPanelTrack(t);
+  $("#p2").replaceChildren(el("div", "ploading", `looking up ${t.artist}…`));
+  $("#p3").replaceChildren();
+  let data = null;
+  try {
+    data = await songPanel(api, {
+      artist: t.artist,
+      title: t.title,
+      obscurity: sliderVal("obscurity"),
+      batchSize: 12,
+      ...digCallbacks(),
+    });
+  } catch (e) {
+    if (seq === panelSeq) $("#p2").replaceChildren(el("div", "ploading", "couldn't reach the graph — " + (e.message || e)));
+    return;
+  }
+  if (seq !== panelSeq || panel.hidden) return; // superseded by a later click
+  if (!data) { $("#p2").replaceChildren(el("div", "ploading", "no artist page for this one")); return; }
+  renderPanelArtist(data);
+  renderPanelSimilar(data);
+}
+
+async function panelSave(t, btn) {
+  const idx = stageTrack(t);
+  await saveTrack(idx);
+  if (store.saved[batch[idx].key]) btn.classList.add("done");
+}
+
+function playAndPanel(t) {
+  const i = stageTrack(t);
+  playIdx(i);
+  openPanel(i);
+}
+
+function renderPanelTrack(t) {
+  const c = $("#p1");
+  c.replaceChildren();
+  const art = el("img", "pbigart");
+  art.src = t.art;
+  art.alt = "";
+  art.addEventListener("click", () => playIdx(stageTrack(t)));
+  c.append(art, el("div", "ptitle", t.title),
+    el("div", "psub", t.artist + (t.album ? " — " + t.album : "") + (t.year ? " · " + t.year : "")));
+  if (t.via) c.append(el("div", "pvia", "via " + t.via));
+
+  const acts = el("div", "pacts");
+  const mk = (label, cls, fn) => {
+    const b = el("button", cls, label);
+    b.addEventListener("click", fn);
+    acts.append(b);
+    return b;
+  };
+  mk("play", "primary", () => playIdx(stageTrack(t)));
+  const love = mk("♥ save", store.saved[t.key] ? "done" : "", () => panelSave(t, love));
+  mk("explore this corner", "", () => { closePanel(); diveFromTile(stageTrack(t)); });
+  mk("queue", "", () => queueTrack(stageTrack(t)));
+  mk("open in spotify", "", () => openInSpotify(stageTrack(t)));
+  c.append(acts);
+
+  c.append(el("h4", "", "make a set from this"));
+  const set = el("div", "pset");
+  for (const [label, size] of [["short · 12", 12], ["medium · 25", 25], ["long · 50", 50]]) {
+    const b = el("button", "", label);
+    b.addEventListener("click", () => makeSet(t, size));
+    set.append(b);
+  }
+  c.append(set);
+}
+
+function renderPanelArtist(data) {
+  const { artist, top, related } = data;
+  const c = $("#p2");
+  c.replaceChildren(el("h4", "", "the artist"));
+
+  const head = el("div", "partist");
+  const pic = el("img");
+  pic.src = artist.picture_big || artist.picture_medium || "";
+  pic.alt = "";
+  const meta = el("div");
+  meta.append(el("div", "pname", artist.name));
+  const bits = [];
+  if (artist.nb_fan) bits.push(artist.nb_fan.toLocaleString() + " fans");
+  if (artist.nb_album) bits.push(artist.nb_album + " releases");
+  meta.append(el("div", "pfans", bits.join(" · ")));
+  head.append(pic, meta);
+  c.append(head);
+
+  if (top.length) {
+    c.append(el("h4", "", "top tracks"));
+    const row = el("div", "prow");
+    for (const t of top) {
+      const im = el("img");
+      im.src = t.art;
+      im.alt = "";
+      im.title = t.title;
+      im.addEventListener("click", () => playAndPanel(t));
+      row.append(im);
+    }
+    c.append(row);
+  }
+
+  if (related.length) {
+    c.append(el("h4", "", "related artists"));
+    const grid = el("div", "prelated");
+    for (const r of related.slice(0, 8)) {
+      const fig = el("figure");
+      const im = el("img");
+      im.src = r.picture_medium || r.picture_big || "";
+      im.alt = "";
+      fig.append(im, el("figcaption", "", r.name));
+      fig.title = "dig from " + r.name;
+      fig.addEventListener("click", () => {
+        closePanel();
+        $("#seed").value = r.name;
+        batchHistory.length = 0;
+        renderBack();
+        runDig(false, r.name);
+      });
+      grid.append(fig);
+    }
+    c.append(grid);
+  }
+}
+
+function renderPanelSimilar(data) {
+  const c = $("#p3");
+  c.replaceChildren(el("h4", "", "songs like this"));
+  if (!data.similar.length) {
+    c.append(el("div", "ploading", "nothing fresh nearby right now — ease the obscure dial"));
+    return;
+  }
+  for (const t of data.similar) {
+    const row = el("div", "psong");
+    const im = el("img");
+    im.src = t.art;
+    im.alt = "";
+    im.loading = "lazy";
+    const m = el("div", "pmeta");
+    m.append(el("div", "pt", t.title), el("div", "pa", t.artist + (t.year ? " · " + t.year : "")));
+    const love = el("button", "plove" + (store.saved[t.key] ? " done" : ""), "♥");
+    love.title = "save to spotify";
+    love.addEventListener("click", (e) => { e.stopPropagation(); panelSave(t, love); });
+    row.append(im, m, love);
+    row.addEventListener("click", () => playAndPanel(t));
+    c.append(row);
+  }
+}
+
+// a set as a journey: the song you liked opens it, then it walks outward
+async function makeSet(t, size) {
+  if (digging) return;
+  digging = true;
+  $("#dig").disabled = true;
+  closePanel();
+  batchHistory.length = 0;
+  renderBack();
+  batch = [];
+  playedIdx.clear();
+  $("#grid").innerHTML = "";
+  stopAudio();
+  showDiggingPlaceholder();
+  status(`building a ${size}-song set from “${t.title}”…`);
+  try {
+    const res = await buildPlaylist(api, {
+      artist: t.artist,
+      title: t.title,
+      size,
+      obscurity: sliderVal("obscurity"),
+      log: status,
+      ...digCallbacks(),
+    });
+    $("#grid .digging")?.remove();
+    const seed = { ...t, via: `${t.artist} — where it starts` };
+    const tracks = [seed, ...res.tracks.filter((x) => x.key !== seed.key)].slice(0, size);
+    batch = tracks;
+    renderTracks(tracks, 0);
+    if (!PREVIEW) {
+      const now = Date.now();
+      for (const x of tracks) if (!store.seen[x.key]) store.seen[x.key] = now;
+      persist();
+    }
+    status(`${tracks.length}-song set out from ${t.artist} — flick drift to play it through`);
+    if (store.spotify.tokens) {
+      showStatusAction("save this set to spotify", () => saveSetToSpotify(tracks, res.name));
+    }
+  } catch (e) {
+    $("#grid .digging")?.remove();
+    status("set failed — " + (e.message || e));
+  }
+  digging = false;
+  $("#dig").disabled = false;
+}
+
+async function saveSetToSpotify(tracks, name) {
+  if (!store.spotify.tokens) { status("connect spotify first"); return; }
+  status(`matching ${tracks.length} songs on spotify…`);
+  const uris = [];
+  let missing = 0;
+  for (const t of tracks) {
+    try {
+      const hit = await mapToSpotify(t);
+      if (hit) uris.push("spotify:track:" + hit.id);
+      else missing++;
+    } catch { missing++; }
+  }
+  if (!uris.length) { status("none of these exist on spotify"); return; }
+  try {
+    const pl = await sp(`/users/${encodeURIComponent(store.spotify.userId)}/playlists`, {
+      method: "POST",
+      body: JSON.stringify({ name: name || "crate set", public: false, description: "dug up by crate" }),
+    });
+    for (let i = 0; i < uris.length; i += 100) {
+      await sp(`/playlists/${pl.id}/tracks`, {
+        method: "POST",
+        body: JSON.stringify({ uris: uris.slice(i, i + 100) }),
+      });
+    }
+    status(`saved to spotify: ${name} · ${uris.length} songs${missing ? ` (${missing} weren't there)` : ""}`);
+    showStatusAction("open it", () => window.open("https://open.spotify.com/playlist/" + pl.id));
+  } catch (e) {
+    status("playlist failed — " + e.message);
+  }
+}
+
 // song → song tunnel from one tile
 async function digFromTile(idx) {
   const t = batch[idx];
@@ -622,7 +876,7 @@ function renderTracks(tracks, startIdx) {
     const acts = el("div", "acts");
     const love = el("button", "love", "♥");
     love.title = "save to spotify (L)";
-    const tunnel = el("button", "tunnel", "⤵");
+    const tunnel = el("button", "tunnel", "↓"); // Space Grotesk has no ⤵
     tunnel.title = "dig from this track (D)";
     const ban = el("button", "ban", "✕");
     ban.title = "never show again (X)";
@@ -634,7 +888,12 @@ function renderTracks(tracks, startIdx) {
     grid.append(tile);
     seenIO?.observe(tile);
 
-    img.addEventListener("click", () => (currentIdx === idx && !audio.paused ? pauseAudio() : diveFromTile(idx)));
+    // a cover plays the song and opens its page — the wall stays behind it
+    img.addEventListener("click", () => {
+      if (currentIdx === idx && !audio.paused) { pauseAudio(); return; }
+      playIdx(idx);
+      openPanel(idx);
+    });
     img.addEventListener("mouseenter", () => {
       // hover only ever previews — full plays are deliberate taps
       if (store.settings.hoverPlay && userInteracted && !$("#fullplay")?.checked) playIdx(idx);
@@ -647,6 +906,17 @@ function renderTracks(tracks, startIdx) {
 
 function tileFor(idx) {
   return $(`.tile[data-idx="${idx}"]`);
+}
+
+// Tracks that live in the panel (top tracks, neighbours) get an index in
+// `batch` without a tile, so every existing action — play, ♥, ban, queue,
+// drift — works on them unchanged.
+function stageTrack(t) {
+  const key = t.key || normKey(t.artist, t.title);
+  const found = batch.findIndex((b) => b.key === key);
+  if (found >= 0) return found;
+  batch.push({ ...t, key });
+  return batch.length - 1;
 }
 
 // ---------- audio ----------
@@ -732,6 +1002,7 @@ function nextDriftIdx() {
     if (playedIdx.has(i)) continue;
     const t = batch[i];
     if (!t || !t.preview || store.banned[t.key]) continue;
+    if (!tileFor(i)) continue; // staged panel tracks aren't part of the drift
     open.push(i);
   }
   if (!open.length) return -1;
@@ -1103,6 +1374,8 @@ function bindControls() {
     $("#" + id)?.addEventListener("change", () => runDig(false));
   }
   $("#gear").addEventListener("click", () => ($("#setup").hidden ? openSettings() : closeSettings()));
+  $("#panelclose")?.addEventListener("click", closePanel);
+  $("#statusact")?.addEventListener("click", () => statusActFn && statusActFn());
   const fp = $("#fullplay");
   if (fp) {
     fp.checked = !!store.settings.fullPlay;
@@ -1118,8 +1391,10 @@ function bindControls() {
   $("#nowopen").addEventListener("click", () => openInSpotify(currentIdx));
 
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { closePanel(); return; }
     if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
     if (e.code === "Space") { e.preventDefault(); audio.paused ? audio.play().catch(() => {}) : audio.pause(); }
+    if (e.key === "i") openPanel(currentIdx);
     if (e.key === "n") playIdx(Math.min(currentIdx + 1, batch.length - 1));
     if (e.key === "p") playIdx(Math.max(currentIdx - 1, 0));
     if (e.key === "l") saveTrack(currentIdx);
