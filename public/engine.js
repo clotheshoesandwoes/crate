@@ -347,15 +347,144 @@ export async function digFromTrack(api, opts) {
   return { tracks: out.slice(0, batchSize), seeds: [`${artist} — ${title}`] };
 }
 
+// The circling: artists who sit next to several artists you already love but
+// whom you have never actually saved. You have been orbiting them for years.
+export async function digCircling(api, opts) {
+  const {
+    libraryArtists = [], obscurity = 0.5, minOverlap = 3,
+    isKnownArtist = () => 0, hasTrack = () => false, isSeen = () => false,
+    artistPenalty = () => 1, batchSize = 40, log = () => {},
+  } = opts;
+  if (!libraryArtists.length) return { tracks: [], seeds: [], orbits: [] };
+
+  // Stage 1 — find a dense corner of the listener's own library. Anchors
+  // scattered across genres share no neighbours, so nothing ever overlaps;
+  // anchors that already sit next to each other make the ring obvious. The
+  // graph decides that, not genre tags, which may not exist.
+  log("finding a dense corner of your library…");
+  let anchorArtists = [];
+  const tried = new Set();
+  for (let attempt = 0; attempt < 5 && anchorArtists.length < 4; attempt++) {
+    const name = libraryArtists[Math.floor(Math.random() * libraryArtists.length)];
+    if (tried.has(name)) continue;
+    tried.add(name);
+    const center = await resolveArtist(api, name);
+    if (!center) continue;
+    const siblings = (await relatedArtists(api, center.id, 25))
+      .filter((r) => isKnownArtist(artistKey(r.name)) >= 1);
+    if (siblings.length >= 2) anchorArtists = [center, ...siblings.slice(0, 7)];
+  }
+  if (anchorArtists.length < 4) {
+    for (const name of libraryArtists.slice(0, 10)) {
+      const a = await resolveArtist(api, name);
+      if (a && !anchorArtists.some((x) => x.id === a.id)) anchorArtists.push(a);
+    }
+  }
+  if (!anchorArtists.length) return { tracks: [], seeds: [], orbits: [] };
+
+  // Stage 2 — who keeps turning up next to all of them
+  log(`mapping the space around ${anchorArtists.map((a) => a.name).slice(0, 3).join(", ")}…`);
+  const tally = new Map(); // deezer id -> { artist, orbits:Set }
+  const anchors = [];
+  for (const A of anchorArtists) {
+    anchors.push(A.name);
+    for (const r of await relatedArtists(api, A.id, 20)) {
+      if (!tally.has(r.id)) tally.set(r.id, { artist: r, orbits: new Set() });
+      tally.get(r.id).orbits.add(A.name);
+    }
+  }
+
+  const strangers = [...tally.values()].filter((c) =>
+    isKnownArtist(artistKey(c.artist.name)) < 1 && artistPenalty(artistKey(c.artist.name)) > 0);
+  let ring = strangers.filter((c) => c.orbits.size >= minOverlap);
+  if (ring.length < 5) ring = strangers.filter((c) => c.orbits.size >= 2);
+  if (!ring.length) return { tracks: [], seeds: anchors, orbits: [] };
+  ring.sort((a, b) => b.orbits.size - a.orbits.size);
+  log(`${ring.length} artists you keep circling`);
+
+  // Fame is a soft preference here, not a filter: the find is "you never
+  // saved them", which is true of famous neighbours too — cutting on fan
+  // count as well leaves almost nobody, since a dense corner of your own
+  // library is mostly, well, your own library.
+  const maxFans = maxFansFor(obscurity);
+  const chosen = pickWeighted(
+    ring,
+    (c) => c.orbits.size * jitter() * ((c.artist.nb_fan || 0) <= maxFans ? 1.6 : 1),
+    Math.min(26, ring.length)
+  );
+
+  const found = [];
+  for (const c of chosen) {
+    const names = [...c.orbits];
+    const via = `circling · next to ${names.slice(0, 3).join(", ")}` +
+      (names.length > 3 ? ` +${names.length - 3}` : "");
+    try { found.push(...(await midCatalogTracks(api, c.artist, via, obscurity, 3))); } catch {}
+  }
+  return {
+    tracks: finalize(found, { hasTrack, isSeen, obscurity, batchSize, maxPerArtist: 2, maxPerAlbum: 1 }),
+    seeds: anchors,
+    orbits: chosen.map((c) => `${c.artist.name} (${c.orbits.size})`),
+  };
+}
+
+// Flip the record over: everything else that came out on this label.
+export async function digLabel(api, opts) {
+  const {
+    label, skipAlbumId = null, obscurity = 0.5,
+    hasTrack = () => false, isSeen = () => false, batchSize = 40, log = () => {},
+  } = opts;
+  if (!label) return { tracks: [], label: "" };
+  log(`pulling the ${label} shelf…`);
+  const j = await api.dz(`search/album?q=${encodeURIComponent(`label:"${label}"`)}&limit=100`);
+  const albums = (j?.data || []).filter((al) => String(al.id) !== String(skipAlbumId));
+  if (!albums.length) return { tracks: [], label };
+
+  const picks = pickWeighted(albums, () => jitter(), Math.min(14, albums.length));
+  const found = [];
+  for (const al of picks) {
+    try {
+      const full = await api.dz(`album/${al.id}`);
+      const tracks = full?.tracks?.data || [];
+      if (!tracks.length) continue;
+      const year = yearOf(full?.release_date || al.release_date);
+      const art = full?.cover_big || al.cover_big || al.cover_medium;
+      for (const t of pickWeighted(tracks, () => jitter(), 2)) {
+        found.push(fromDeezerTrack(t, al.artist, {
+          album: full?.title || al.title, albumId: al.id, year, art, via: `${label} · the label`,
+        }));
+      }
+    } catch {}
+  }
+  return {
+    tracks: finalize(found, { hasTrack, isSeen, obscurity, batchSize, maxPerArtist: 2, maxPerAlbum: 1 }),
+    label,
+    shelfSize: j?.total || albums.length,
+  };
+}
+
 // everything the detail panel shows for one track: who made it, what else
 // they made, who sits next to them, and songs from that neighbourhood.
 export async function songPanel(api, opts) {
   const {
-    artist, title = "", obscurity = 0.5,
+    artist, title = "", albumId = null, obscurity = 0.5,
     hasTrack = () => false, isSeen = () => false, batchSize = 12, log = () => {},
   } = opts;
   const A = await resolveArtist(api, artist);
   if (!A) return null;
+
+  // the record's own details — label is what makes the shelf dig possible
+  let release = null;
+  if (albumId) {
+    try {
+      const al = await api.dz(`album/${albumId}`);
+      if (al && !al.error) {
+        release = {
+          id: al.id, title: al.title, label: al.label || "",
+          year: yearOf(al.release_date), tracks: al.nb_tracks || null,
+        };
+      }
+    } catch {}
+  }
   const topJson = await api.dz(`artist/${A.id}/top?limit=12`);
   const related = await relatedArtists(api, A.id, 12);
   const top = (topJson?.data || [])
@@ -375,7 +504,7 @@ export async function songPanel(api, opts) {
   const similar = finalize(found, {
     hasTrack, isSeen, obscurity, batchSize, maxPerArtist: 1, maxPerAlbum: 1,
   });
-  return { artist: A, top, related, similar };
+  return { artist: A, top, related, similar, release };
 }
 
 // A set built as a journey: opens on the song you liked, then walks outward —

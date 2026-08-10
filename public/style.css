@@ -419,7 +419,12 @@ button.quiet:hover { color: var(--fg); text-decoration-color: var(--fg); }
 .tile { position: relative; }
 .tile.gone { opacity: 0.15; pointer-events: none; }
 
-.tile .art { position: relative; }
+.tile .art { position: relative; background: var(--panel); }
+
+/* blindfold: the sleeve and the credits go away, the music does not */
+#grid.blind .tile:not(.revealed) img { opacity: 0; }
+#grid.blind .tile:not(.revealed) .meta { visibility: hidden; }
+#nowbar.blind #nowart { opacity: 0; }
 .tile img {
   display: block;
   width: 100%;

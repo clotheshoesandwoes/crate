@@ -1,7 +1,7 @@
 // crate — client app: Spotify auth + library profile, taste lanes, dig UI,
 // previews, drift, save/queue-back to Spotify.
 import {
-  dig, digFromTrack, digBridge, digDescent, digNeighbors,
+  dig, digFromTrack, digBridge, digDescent, digNeighbors, digCircling, digLabel,
   songPanel, buildPlaylist, normKey, artistKey,
 } from "./engine.js";
 
@@ -392,6 +392,7 @@ async function runDig(append = false, seedOverride = null, note = "") {
   const manual = seedOverride || $("#seed").value.trim();
   if (mode === "bridge") return runPath("bridge", manual);
   if (mode === "hole") return runPath("hole", manual);
+  if (mode === "circling") return runCircling();
   let seeds = manual ? manual.split(",").map((s) => s.trim()).filter(Boolean) : sampleSeeds(mode, sliderVal("farout"));
   if (!seeds.length) {
     status("connect spotify (settings) or type an artist to dig from");
@@ -435,6 +436,140 @@ async function runDig(append = false, seedOverride = null, note = "") {
   }
   digging = false;
   $("#dig").disabled = false;
+}
+
+// the circling: artists your library surrounds but never picked up
+function sampleLibrary(n, laneName = null) {
+  const p = store.profile;
+  let entries = Object.entries(p.artists);
+  const useLane = laneName || activeLane;
+  if (useLane && p.lanes?.[useLane]) {
+    const lane = p.lanes[useLane];
+    const inLane = entries.filter(([k]) => lane[k] !== undefined);
+    if (inLane.length >= 5) entries = inLane;
+  }
+  if (!entries.length) return [];
+  const weights = entries.map(([k, c]) => Math.pow(c, 0.6) + (p.top[k] || 0) / 10);
+  const total = weights.reduce((a, b) => a + b, 0);
+  const picks = new Set();
+  let guard = 0;
+  while (picks.size < Math.min(n, entries.length) && guard++ < n * 40) {
+    let r = Math.random() * total;
+    for (let i = 0; i < entries.length; i++) {
+      r -= weights[i];
+      if (r <= 0) { picks.add(entries[i][0]); break; }
+    }
+  }
+  return [...picks];
+}
+
+function startWall() {
+  closePanel();
+  batchHistory.length = 0;
+  renderBack();
+  batch = [];
+  playedIdx.clear();
+  $("#grid").innerHTML = "";
+  stopAudio();
+  showDiggingPlaceholder();
+}
+
+function landWall(tracks) {
+  $("#grid .digging")?.remove();
+  if (!PREVIEW) {
+    const now = Date.now();
+    for (const t of tracks) if (!store.seen[t.key]) store.seen[t.key] = now;
+    persist();
+  }
+  batch = tracks;
+  renderTracks(tracks, 0);
+}
+
+function randomLane() {
+  const lanes = store.profile.lanes;
+  if (!lanes) return null;
+  const entries = Object.entries(lanes)
+    .map(([name, artists]) => [name, Object.values(artists).reduce((a, b) => a + b, 0)]);
+  if (!entries.length) return null;
+  const total = entries.reduce((s, [, w]) => s + w, 0);
+  let r = Math.random() * total;
+  for (const [name, w] of entries) {
+    r -= w;
+    if (r <= 0) return name;
+  }
+  return entries[0][0];
+}
+
+async function runCircling() {
+  if (digging) return;
+  // a wide sample of candidate centres; the engine only resolves the few it
+  // needs to find a dense corner, so a big list costs nothing
+  const lane = activeLane || randomLane();
+  const anchors = sampleLibrary(40, lane);
+  if (anchors.length < 3) {
+    status("circling reads your library — connect spotify in settings first");
+    openSettings();
+    return;
+  }
+  digging = true;
+  $("#dig").disabled = true;
+  startWall();
+  try {
+    const res = await digCircling(api, {
+      libraryArtists: anchors,
+      obscurity: sliderVal("obscurity"),
+      batchSize: 40,
+      log: status,
+      ...digCallbacks(),
+    });
+    landWall(res.tracks);
+    status(res.tracks.length
+      ? `${res.tracks.length} artists you keep orbiting and never saved · found around ${res.seeds.slice(0, 3).join(", ")}`
+      : "no one circling in this corner — dig again, it starts from a different artist each time");
+  } catch (e) {
+    $("#grid .digging")?.remove();
+    status("circling failed — " + (e.message || e));
+  }
+  digging = false;
+  $("#dig").disabled = false;
+}
+
+// flip the record over: the rest of the label's shelf
+async function runLabel(label, skipAlbumId) {
+  if (digging || !label) return;
+  digging = true;
+  $("#dig").disabled = true;
+  startWall();
+  status(`pulling the ${label} shelf…`);
+  try {
+    const res = await digLabel(api, {
+      label,
+      skipAlbumId,
+      obscurity: sliderVal("obscurity"),
+      batchSize: 40,
+      log: status,
+      ...digCallbacks(),
+    });
+    landWall(res.tracks);
+    status(res.tracks.length
+      ? `${res.tracks.length} more from ${res.label}${res.shelfSize ? ` · ${res.shelfSize} records on that shelf` : ""}`
+      : `nothing new on ${label} right now`);
+  } catch (e) {
+    $("#grid .digging")?.remove();
+    status("label dig failed — " + (e.message || e));
+  }
+  digging = false;
+  $("#dig").disabled = false;
+}
+
+// blindfold: judge by ear, reveal when you save or skip
+const revealed = new Set();
+const blindOn = () => !!$("#blind")?.checked;
+function revealTrack(t, idx) {
+  if (!t || revealed.has(t.key)) return;
+  revealed.add(t.key);
+  tileFor(idx)?.classList.add("revealed");
+  if (idx === currentIdx) renderNowbar(t);
 }
 
 // pathways: bridge (artist > artist) and rabbit hole (ever more obscure)
@@ -594,6 +729,7 @@ async function openPanel(idx) {
     data = await songPanel(api, {
       artist: t.artist,
       title: t.title,
+      albumId: t.albumId || null,
       obscurity: sliderVal("obscurity"),
       batchSize: 12,
       ...digCallbacks(),
@@ -656,9 +792,24 @@ function renderPanelTrack(t) {
 }
 
 function renderPanelArtist(data) {
-  const { artist, top, related } = data;
+  const { artist, top, related, release } = data;
   const c = $("#p2");
-  c.replaceChildren(el("h4", "", "the artist"));
+  c.replaceChildren();
+
+  // the record itself — and the shelf it came off
+  if (release && (release.label || release.year)) {
+    c.append(el("h4", "", "the record"));
+    c.append(el("div", "psub", [release.title, release.year, release.label].filter(Boolean).join(" · ")));
+    if (release.label) {
+      const acts = el("div", "pacts");
+      const b = el("button", "", `more on ${release.label}`);
+      b.addEventListener("click", () => runLabel(release.label, release.id));
+      acts.append(b);
+      c.append(acts);
+    }
+  }
+
+  c.append(el("h4", "", "the artist"));
 
   const head = el("div", "partist");
   const pic = el("img");
@@ -866,6 +1017,7 @@ function renderTracks(tracks, startIdx) {
     const idx = startIdx + i;
     const tile = el("div", "tile");
     tile.dataset.idx = idx;
+    if (revealed.has(t.key)) tile.classList.add("revealed");
     if (t.via) tile.title = "via " + t.via;
     const img = el("img");
     img.loading = "lazy";
@@ -1022,8 +1174,18 @@ audio.addEventListener("ended", () => {
 });
 
 function renderNowbar(t, note = "") {
-  $("#nowbar").hidden = false;
+  const bar = $("#nowbar");
+  bar.hidden = false;
   $("#nowart").src = t.art;
+  const hidden = blindOn() && !revealed.has(t.key);
+  bar.classList.toggle("blind", hidden);
+  if (hidden) {
+    $("#nowtitle").textContent = "———";
+    $("#nowsub").textContent = "blindfolded · save or skip to see what it is";
+    $("#nowlove").classList.remove("done");
+    $("#nowprog").style.width = "0%";
+    return;
+  }
   $("#nowtitle").textContent = t.title;
   const via = t.via ? ` · via ${t.via}` : "";
   $("#nowsub").textContent = t.artist + (t.album ? " — " + t.album : "") + (t.year ? " · " + t.year : "") + via + (note ? " · " + note : "");
@@ -1085,6 +1247,7 @@ function logFind(t, spotifyId) {
 async function saveTrack(idx) {
   const t = batch[idx];
   if (!t || store.saved[t.key]) return;
+  revealTrack(t, idx);
   const tile = tileFor(idx);
   if (!store.spotify.tokens) {
     store.savedLocal.push({ ...t, ts: Date.now() });
@@ -1131,6 +1294,7 @@ async function saveTrack(idx) {
 function banTrack(idx) {
   const t = batch[idx];
   if (!t) return;
+  revealTrack(t, idx);
   store.banned[t.key] = Date.now();
   persist();
   const tile = tileFor(idx);
@@ -1356,6 +1520,7 @@ function bindControls() {
   const PLACEHOLDERS = {
     bridge: "artist > artist (blank = across your lanes)",
     hole: "start artist… (blank = your taste)",
+    circling: "circling reads your whole library — just hit dig",
   };
   for (const b of $("#modes").querySelectorAll("button")) {
     b.addEventListener("click", () => {
@@ -1380,6 +1545,17 @@ function bindControls() {
   if (fp) {
     fp.checked = !!store.settings.fullPlay;
     fp.addEventListener("change", () => { store.settings.fullPlay = fp.checked; persist(); });
+  }
+  const bl = $("#blind");
+  if (bl) {
+    bl.checked = !!store.settings.blindfold;
+    $("#grid").classList.toggle("blind", bl.checked);
+    bl.addEventListener("change", () => {
+      store.settings.blindfold = bl.checked;
+      persist();
+      $("#grid").classList.toggle("blind", bl.checked);
+      if (currentIdx >= 0 && batch[currentIdx]) renderNowbar(batch[currentIdx]);
+    });
   }
   $("#prof")?.addEventListener("click", () => ($("#profile").hidden ? openProfile() : closeProfile()));
   $("#closeprofile")?.addEventListener("click", closeProfile);

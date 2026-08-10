@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import {
   dig, digFromTrack, digBridge, digDescent, digNeighbors, songPanel, buildPlaylist,
+  digCircling, digLabel,
 } from "./public/engine.js";
 
 const PORT = 8824; // separate from the app so a running instance isn't disturbed
@@ -99,6 +100,30 @@ try {
   const rNb = await digNeighbors(api, { artist: "Burial", title: "Archangel", obscurity: 0.5, batchSize: 24, ...base });
   check("dive: tracks", rNb.tracks.length >= 10, `${rNb.tracks.length} tracks`);
   check("dive: provenance", rNb.tracks.every((t) => t.via && t.via.startsWith("near")));
+
+  // the circling: strangers your library surrounds
+  const lib = ["Portishead", "Massive Attack", "Tricky", "Burial", "Boards of Canada", "Radiohead"];
+  const libSet = new Set(lib.map((s) => s.toLowerCase()));
+  const rCirc = await digCircling(api, {
+    ...base, libraryArtists: lib, obscurity: 0.5, batchSize: 30,
+    isKnownArtist: (k) => (libSet.has(k) ? 5 : 0),
+  });
+  check("circling: tracks", rCirc.tracks.length >= 8, `${rCirc.tracks.length} tracks`);
+  check("circling: never your own artists", rCirc.tracks.every((t) => !libSet.has(t.artist.toLowerCase())));
+  check("circling: found multi-orbit strangers", rCirc.orbits.length >= 3, rCirc.orbits.slice(0, 4).join(", "));
+  check("circling: provenance names the orbits", rCirc.tracks.every((t) => t.via.startsWith("circling")), rCirc.tracks[0]?.via);
+
+  // the label shelf
+  const rLab = await digLabel(api, { ...base, label: "Stones Throw Records", obscurity: 0.5, batchSize: 25 });
+  check("label: tracks", rLab.tracks.length >= 8, `${rLab.tracks.length} from ${rLab.label} · shelf ${rLab.shelfSize}`);
+  check("label: provenance", rLab.tracks.every((t) => t.via.includes("the label")));
+  console.log("     shelf sample:", rLab.tracks.slice(0, 4).map((t) => `${t.artist} — ${t.title}`).join(" | "));
+
+  // panel carries the record's label (that's what makes the shelf dig possible)
+  const albumHit = await api.dz("search/album?q=madvillainy&limit=1");
+  const panLab = await songPanel(api, { ...base, artist: "Madvillain", title: "Accordion", albumId: albumHit.data[0].id });
+  check("panel: reads the label off the record", !!panLab?.release?.label,
+    `${panLab?.release?.title} · ${panLab?.release?.year} · ${panLab?.release?.label}`);
 
   // detail panel: the 1-2-3
   const pan = await songPanel(api, { artist: "Burial", title: "Archangel", obscurity: 0.5, ...base });
