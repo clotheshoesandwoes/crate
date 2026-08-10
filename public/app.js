@@ -19,7 +19,7 @@ const DEFAULT_STORE = {
   spotify: { clientId: "", tokens: null, userId: "", userName: "" },
   lastfm: { apiKey: "" },
   settings: { playlist: true, playlistId: null, hoverPlay: true },
-  profile: { builtAt: 0, newestAddedAt: "", count: 0, artists: {}, top: {}, lanes: null, trackKeys: [], isrcs: [], years: {} },
+  profile: { builtAt: 0, newestAddedAt: "", count: 0, artists: {}, top: {}, lanes: null, trackKeys: [], isrcs: [], years: {}, library: [] },
   seen: {}, banned: {}, saved: {}, savedLocal: [], finds: [],
 };
 
@@ -64,6 +64,7 @@ async function loadStore() {
     if (!store) store = structuredClone(DEFAULT_STORE);
   }
   store.profile.lanes = store.profile.lanes || null;
+  store.profile.library = store.profile.library || []; // empty until a rescan
   store.finds = store.finds || [];
   if (!store.settings.playlistMode) store.settings.playlistMode = store.settings.playlist === false ? "none" : "crate";
   trackKeySet = new Set(store.profile.trackKeys || []);
@@ -293,9 +294,12 @@ function renderLanes() {
 async function scanLibrary(full = false) {
   scanAbort = false;
   const p = store.profile;
-  if (full) Object.assign(p, { builtAt: 0, newestAddedAt: "", count: 0, artists: {}, top: {}, lanes: null, trackKeys: [], isrcs: [], years: {} });
+  if (full) Object.assign(p, { builtAt: 0, newestAddedAt: "", count: 0, artists: {}, top: {}, lanes: null, trackKeys: [], isrcs: [], years: {}, library: [] });
   const newestKnown = p.newestAddedAt || "";
   let offset = 0, added = 0, newest = newestKnown, done = false;
+  // the songs themselves, kept this time: the library is a place you look
+  // through, not just a filter for what to leave out
+  const freshly = [];
 
   try {
     const me = await sp("/me");
@@ -324,6 +328,14 @@ async function scanLibrary(full = false) {
       if (isrc && !isrcSet.has(isrc)) { isrcSet.add(isrc); p.isrcs.push(isrc); }
       const y = parseInt(String(t.album?.release_date || "").slice(0, 4), 10);
       if (y) p.years[y] = (p.years[y] || 0) + 1;
+      const img = t.album?.images || [];
+      freshly.push({
+        t: t.name,
+        a: primary,
+        art: (img[img.length - 1] || img[0] || {}).url || "",
+        y: y || null,
+        at: item.added_at || "",
+      });
       added++;
     }
     offset += 50;
@@ -331,6 +343,10 @@ async function scanLibrary(full = false) {
     status(`scanning liked songs… ${p.count + added}`);
     await new Promise((r) => setTimeout(r, 80));
   }
+  // Spotify hands back newest-first and the scan stops at what we already had,
+  // so this run's haul goes on top. Bounded so a 20k library can't blow the
+  // localStorage the deployed build runs on.
+  if (freshly.length) p.library = [...freshly, ...p.library].slice(0, 6000);
   p.count += added;
   p.newestAddedAt = newest;
   p.builtAt = Date.now();
@@ -390,6 +406,7 @@ async function runDig(append = false, seedOverride = null, note = "") {
   if (digging) return;
   const mode = $("#modes .on").dataset.mode;
   const manual = seedOverride || $("#seed").value.trim();
+  if (mode === "mine") return showLibrary(manual);
   if (mode === "bridge") return runPath("bridge", manual);
   if (mode === "hole") return runPath("hole", manual);
   if (mode === "circling") return runCircling();
@@ -438,6 +455,72 @@ async function runDig(append = false, seedOverride = null, note = "") {
   $("#dig").disabled = false;
 }
 
+// ---------- your crate ----------
+// The library used to exist only as a filter — 1,654 songs the app knew about
+// and never showed you, while it rolled dice over your artist names to decide
+// what to dig from. It is the first thing you see now: flip through your own
+// records, pull one out, and go from there.
+const LIBRARY_PAGE = 300;
+
+function showLibrary(filter = "") {
+  const p = store.profile;
+  closePanel();
+  batchHistory.length = 0;
+  renderBack();
+  batch = [];
+  playedIdx.clear();
+  stopAudio();
+  const grid = $("#grid");
+  grid.classList.remove("aslist");
+  grid.innerHTML = "";
+
+  if (!p.library.length) {
+    const connected = !!store.spotify.tokens;
+    grid.append(el("div", "digging", !connected
+      ? "connect spotify to see your songs"
+      : p.count
+        ? "your songs were counted, but never kept — one rescan brings them in"
+        : "nothing scanned yet"));
+    status(!connected
+      ? "connect spotify in settings to flip through your own crate"
+      : p.count
+        ? `${p.count} liked songs counted, none kept — one rescan and they're here`
+        : "scan your library to fill your crate");
+    if (connected) {
+      showStatusAction(p.count ? "rescan my library" : "scan my library",
+        () => scanLibrary(true).then(() => showLibrary()));
+    }
+    return;
+  }
+
+  const q = filter.trim().toLowerCase();
+  const hits = q ? p.library.filter((s) => `${s.t} ${s.a}`.toLowerCase().includes(q)) : p.library;
+  const shown = hits.slice(0, LIBRARY_PAGE);
+
+  for (const s of shown) {
+    const tile = el("div", "tile mine");
+    tile.title = `dig from “${s.t}”`;
+    const img = el("img");
+    img.loading = "lazy";
+    img.src = s.art;
+    img.alt = "";
+    const art = el("div", "art");
+    art.append(img);
+    const meta = el("div", "meta");
+    meta.append(el("div", "t", s.t), el("div", "a", s.a + (s.y ? " · " + s.y : "")));
+    tile.append(art, meta);
+    tile.addEventListener("click", () => tunnelFrom(s.a, s.t));
+    grid.append(tile);
+  }
+
+  if (!shown.length) {
+    grid.append(el("div", "digging", `nothing in your crate matches “${filter.trim()}”`));
+  }
+  status(q
+    ? `${hits.length} of your songs match “${filter.trim()}”${hits.length > shown.length ? ` · showing the first ${shown.length}` : ""}`
+    : `${p.library.length} songs in your crate · tap one to hear what's like it${p.library.length > shown.length ? ` · showing the newest ${shown.length}, search to go deeper` : ""}`);
+}
+
 // the circling: artists your library surrounds but never picked up
 function sampleLibrary(n, laneName = null) {
   const p = store.profile;
@@ -470,11 +553,14 @@ function startWall() {
   batch = [];
   playedIdx.clear();
   $("#grid").innerHTML = "";
+  $("#grid").classList.remove("aslist");
   stopAudio();
   showDiggingPlaceholder();
 }
 
-function landWall(tracks) {
+// `list` present = this view's finding is an order or a count, so lay it out
+// as a list rather than a wall of sleeves
+function landWall(tracks, list = null) {
   $("#grid .digging")?.remove();
   if (!PREVIEW) {
     const now = Date.now();
@@ -482,7 +568,8 @@ function landWall(tracks) {
     persist();
   }
   batch = tracks;
-  renderTracks(tracks, 0);
+  if (list) renderList(tracks, 0, list);
+  else renderTracks(tracks, 0);
 }
 
 async function runCircling() {
@@ -508,7 +595,13 @@ async function runCircling() {
       log: status,
       ...digCallbacks(),
     });
-    landWall(res.tracks);
+    // the ring, strongest orbit first: the number is how many of your own
+    // artists this stranger stands between
+    landWall(res.tracks, {
+      head: res.tracks.length ? "each × is one of your artists they stand between" : "",
+      lead: (t) => (t.orbits ? `${t.orbits}×` : ""),
+      note: (t) => (t.orbitNames?.length ? "between " + t.orbitNames.join(", ") : ""),
+    });
     status(res.tracks.length
       ? `${res.tracks.length} artists you keep orbiting and never saved · found around ${res.seeds.slice(0, 3).join(", ")}`
       : "no one circling in this corner — dig again, it starts from a different artist each time");
@@ -537,7 +630,15 @@ async function runLabel(label, skipAlbumId, skipArtistId) {
       log: status,
       ...digCallbacks(),
     });
-    landWall(res.tracks);
+    // a shelf is a roster: the act is the unit, so it leads each line
+    landWall(res.tracks, {
+      head: res.tracks.length ? "others on the shelf" : "",
+      // a label's catalog has a chronology — that's what the shelf is
+      lead: (t) => (t.year ? String(t.year) : ""),
+      // singles name the album after the track — no need to say it twice
+      note: (t) => (t.album && normKey("", t.album) !== normKey("", t.title) ? t.album : ""),
+      hideYear: true,
+    });
     // major-label strings ("Alamo/Columbia") are barely a shelf; the imprints
     // are where this pays off, so say plainly which one you just opened
     status(res.tracks.length
@@ -601,6 +702,7 @@ async function runPath(kind, manual) {
   batch = [];
   playedIdx.clear();
   $("#grid").innerHTML = "";
+  $("#grid").classList.remove("aslist");
   stopAudio();
   showDiggingPlaceholder();
   try {
@@ -614,7 +716,25 @@ async function runPath(kind, manual) {
       persist();
     }
     batch = res.tracks;
-    renderTracks(res.tracks, 0);
+    // both pathways read downward: a bridge is stops in order, a rabbit hole
+    // is the same walk with the rooms getting smaller. The number carries it.
+    // the head names what the left column means; the status line carries the
+    // summary, so neither repeats the other
+    if (kind === "bridge") {
+      renderList(res.tracks, 0, {
+        head: `${res.path.length} stops, in order`,
+        lead: (t) => (t.step ? `${t.step}` : ""),
+        // the number already says which stop; only speak up when the track is
+        // credited to someone other than the artist the stop is named for
+        note: (t) => (otherCredit(t) ? `on ${t.stepName}'s stop` : ""),
+      });
+    } else {
+      renderList(res.tracks, 0, {
+        head: "fans left in the room",
+        lead: (t) => fansShort(t.fans),
+        note: (t) => stepNote(`depth ${t.step}`, t),
+      });
+    }
     if (!res.tracks.length) {
       status("came up empty — try different ends or ease the obscurity dial");
     } else if (kind === "bridge") {
@@ -901,7 +1021,14 @@ async function makeSet(t, size) {
     const seed = { ...t, via: `${t.artist} — where it starts` };
     const tracks = [seed, ...res.tracks.filter((x) => x.key !== seed.key)].slice(0, size);
     batch = tracks;
-    renderTracks(tracks, 0);
+    // a set is meant to be played start to finish, so it's a tracklist:
+    // numbered, in order, with the running time it actually adds up to
+    const mins = Math.round(tracks.reduce((s, x) => s + (x.duration || 0), 0) / 60);
+    renderList(tracks, 0, {
+      head: `${tracks.length} songs out from ${t.artist}${mins ? ` · ${mins} min` : ""}`,
+      lead: (x, i) => String(i + 1).padStart(2, "0"),
+      note: (x) => x.via || "",
+    });
     if (!PREVIEW) {
       const now = Date.now();
       for (const x of tracks) if (!store.seen[x.key]) store.seen[x.key] = now;
@@ -951,21 +1078,25 @@ async function saveSetToSpotify(tracks, name) {
 }
 
 // song → song tunnel from one tile
-async function digFromTile(idx) {
-  const t = batch[idx];
-  if (!t || digging) return;
+const digFromTile = (idx) => (batch[idx] ? tunnelFrom(batch[idx].artist, batch[idx].title) : undefined);
+
+// song → songs like it. Reached from the ↓ on any tile, and from tapping
+// anything in your own library.
+async function tunnelFrom(artist, title) {
+  if (digging) return;
   digging = true;
   $("#dig").disabled = true;
   stopAudio();
   batch = [];
   playedIdx.clear();
   $("#grid").innerHTML = "";
+  $("#grid").classList.remove("aslist");
   showDiggingPlaceholder();
-  status(`tunneling from “${t.title}”…`);
+  status(`finding songs like “${title}”…`);
   try {
     const res = await digFromTrack(api, {
-      artist: t.artist,
-      title: t.title,
+      artist,
+      title,
       obscurity: sliderVal("obscurity"),
       batchSize: 40,
       log: status,
@@ -975,8 +1106,8 @@ async function digFromTile(idx) {
     batch = res.tracks;
     renderTracks(res.tracks, 0);
     status(res.tracks.length
-      ? `${res.tracks.length} finds · tunneled from ${res.seeds[0]}`
-      : "tunnel came up empty — try digging from the artist instead");
+      ? `${res.tracks.length} finds · like “${title}” by ${artist}`
+      : "nothing close enough — try digging from the artist instead");
   } catch (e) {
     $("#grid .digging")?.remove();
     status("tunnel failed — " + (e.message || e));
@@ -1000,53 +1131,110 @@ const seenIO = typeof IntersectionObserver !== "undefined"
     }, { threshold: 0.6 })
   : null;
 
+// The walk stopped at an artist; the track may be credited to someone else
+// (a remix, a guest). Name the stop only when it isn't already the line above.
+const otherCredit = (t) => t.stepName && artistKey(t.stepName) !== artistKey(t.artist);
+const stepNote = (label, t) => (otherCredit(t) ? `${label} · ${t.stepName}` : label);
+
+// 2,140,000 → 2.1M. The rabbit hole is only legible if the numbers line up.
+const fansShort = (n) => {
+  n = Number(n) || 0;
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1e3) return Math.round(n / 1e3) + "k";
+  return n ? String(n) : "";
+};
+
+// Every view is built from the same parts — a sleeve, a title, the three
+// actions, a progress line — and keeps the `tile` class, because that class is
+// the behaviour contract the rest of the app talks to (tileFor, .playing,
+// .prog, .love, .gone). What changes between views is the arrangement.
+function trackParts(t, idx) {
+  const img = el("img");
+  img.loading = "lazy";
+  img.src = t.art;
+  img.alt = "";
+  const meta = el("div", "meta");
+  meta.append(el("div", "t", t.title), el("div", "a", t.artist + (t.year ? " · " + t.year : "")));
+  const acts = el("div", "acts");
+  const love = el("button", "love", "♥");
+  love.title = "save to spotify (L)";
+  const tunnel = el("button", "tunnel", "↓"); // Space Grotesk has no ⤵
+  tunnel.title = "dig from this track (D)";
+  const ban = el("button", "ban", "✕");
+  ban.title = "never show again (X)";
+  acts.append(love, tunnel, ban);
+  const prog = el("div", "prog");
+  const art = el("div", "art");
+  art.append(img);
+
+  // a cover plays the song and opens its page — the view stays behind it
+  img.addEventListener("click", () => {
+    if (currentIdx === idx && !audio.paused) { pauseAudio(); return; }
+    playIdx(idx);
+    // blindfolded, that page would name the artist, the album and the label
+    // before you had an opinion. The reveal is the point, so it waits for
+    // the ♥ or the ✕.
+    if (blindOn() && !revealed.has(t.key)) return;
+    openPanel(idx);
+  });
+  img.addEventListener("mouseenter", () => {
+    // hover only ever previews — full plays are deliberate taps
+    if (store.settings.hoverPlay && userInteracted && !$("#fullplay")?.checked) playIdx(idx);
+  });
+  love.addEventListener("click", (e) => { e.stopPropagation(); saveTrack(idx); });
+  tunnel.addEventListener("click", (e) => { e.stopPropagation(); digFromTile(idx); });
+  ban.addEventListener("click", (e) => { e.stopPropagation(); banTrack(idx); });
+  // the wall hangs the actions and the progress line on the sleeve; a row is
+  // 46px of sleeve and has no room, so it places them itself
+  return { art, meta, acts, prog };
+}
+
+function shell(t, idx, cls) {
+  const node = el("div", cls);
+  node.dataset.idx = idx;
+  if (revealed.has(t.key)) node.classList.add("revealed");
+  if (t.via) node.title = "via " + t.via;
+  return node;
+}
+
+// the wall: a field of sleeves to scan. Right for new / old gems / deep cuts,
+// where nothing about a track matters more than what it looks and sounds like.
 function renderTracks(tracks, startIdx) {
   const grid = $("#grid");
+  grid.classList.remove("aslist");
   tracks.forEach((t, i) => {
     const idx = startIdx + i;
-    const tile = el("div", "tile");
-    tile.dataset.idx = idx;
-    if (revealed.has(t.key)) tile.classList.add("revealed");
-    if (t.via) tile.title = "via " + t.via;
-    const img = el("img");
-    img.loading = "lazy";
-    img.src = t.art;
-    img.alt = "";
-    const meta = el("div", "meta");
-    meta.append(el("div", "t", t.title), el("div", "a", t.artist + (t.year ? " · " + t.year : "")));
-    const acts = el("div", "acts");
-    const love = el("button", "love", "♥");
-    love.title = "save to spotify (L)";
-    const tunnel = el("button", "tunnel", "↓"); // Space Grotesk has no ⤵
-    tunnel.title = "dig from this track (D)";
-    const ban = el("button", "ban", "✕");
-    ban.title = "never show again (X)";
-    acts.append(love, tunnel, ban);
-    const prog = el("div", "prog");
-    const art = el("div", "art");
-    art.append(img, acts, prog);
+    const tile = shell(t, idx, "tile");
+    const { art, meta, acts, prog } = trackParts(t, idx);
+    art.append(acts, prog);
     tile.append(art, meta);
     grid.append(tile);
     seenIO?.observe(tile);
-
-    // a cover plays the song and opens its page — the wall stays behind it
-    img.addEventListener("click", () => {
-      if (currentIdx === idx && !audio.paused) { pauseAudio(); return; }
-      playIdx(idx);
-      // blindfolded, that page would name the artist, the album and the label
-      // before you had an opinion. The reveal is the point, so it waits for
-      // the ♥ or the ✕.
-      if (blindOn() && !revealed.has(t.key)) return;
-      openPanel(idx);
-    });
-    img.addEventListener("mouseenter", () => {
-      // hover only ever previews — full plays are deliberate taps
-      if (store.settings.hoverPlay && userInteracted && !$("#fullplay")?.checked) playIdx(idx);
-    });
-    love.addEventListener("click", (e) => { e.stopPropagation(); saveTrack(idx); });
-    tunnel.addEventListener("click", (e) => { e.stopPropagation(); digFromTile(idx); });
-    ban.addEventListener("click", (e) => { e.stopPropagation(); banTrack(idx); });
   });
+}
+
+// the list: for the views whose finding IS an order or a count — a path, a
+// descent, a ring, a shelf, a tracklist. `lead` is the column that carries
+// the meaning; `note` is the line of context under the title.
+function renderList(tracks, startIdx, opts = {}) {
+  // hideYear: for views whose lead column IS the year, so it isn't said twice
+  const { head = "", lead = () => "", note = () => "", hideYear = false } = opts;
+  const grid = $("#grid");
+  grid.classList.add("aslist");
+  if (head) grid.append(el("div", "listhead", head));
+  const list = el("ol", "list");
+  tracks.forEach((t, i) => {
+    const idx = startIdx + i;
+    const row = shell(t, idx, "tile row");
+    const { art, meta, acts, prog } = trackParts(t, idx);
+    if (hideYear) meta.querySelector(".a").textContent = t.artist;
+    const n = note(t, i);
+    if (n) meta.append(el("div", "n", n));
+    row.append(el("div", "lead", String(lead(t, i) ?? "")), art, meta, acts, prog);
+    list.append(row);
+    seenIO?.observe(row);
+  });
+  grid.append(list);
 }
 
 function tileFor(idx) {
@@ -1506,21 +1694,35 @@ async function makePlaylistFromFinds() {
 // ---------- controls ----------
 function sliderVal(id) { return parseInt($("#" + id).value, 10) / 100; }
 
+const PLACEHOLDERS = {
+  mine: "search your crate…",
+  bridge: "artist > artist (blank = across your lanes)",
+  hole: "start artist… (blank = your taste)",
+  circling: "reads your library — just hit dig",
+};
+
+function setMode(m) {
+  const b = $(`#modes button[data-mode="${m}"]`);
+  if (!b) return;
+  $("#modes .on")?.classList.remove("on");
+  b.classList.add("on");
+  $("#yearwrap").hidden = m !== "gems";
+  $("#seed").placeholder = PLACEHOLDERS[m] || "dig from an artist… (blank = your taste)";
+}
+
 function bindControls() {
   $("#dig").addEventListener("click", () => { batchHistory.length = 0; renderBack(); runDig(false); });
   $("#backbtn")?.addEventListener("click", goBack);
   $("#seed").addEventListener("keydown", (e) => { if (e.key === "Enter") { batchHistory.length = 0; renderBack(); runDig(false); } });
-  const PLACEHOLDERS = {
-    bridge: "artist > artist (blank = across your lanes)",
-    hole: "start artist… (blank = your taste)",
-    circling: "circling reads your whole library — just hit dig",
-  };
+  // in your own crate the box is a search, so it filters as you type
+  $("#seed").addEventListener("input", () => {
+    if ($("#modes .on")?.dataset.mode === "mine") showLibrary($("#seed").value);
+  });
+  // whatever the markup starts on, the box and the year cap must agree with it
+  setMode($("#modes .on")?.dataset.mode || "new");
   for (const b of $("#modes").querySelectorAll("button")) {
     b.addEventListener("click", () => {
-      $("#modes .on")?.classList.remove("on");
-      b.classList.add("on");
-      $("#yearwrap").hidden = b.dataset.mode !== "gems";
-      $("#seed").placeholder = PLACEHOLDERS[b.dataset.mode] || "dig from an artist… (blank = your taste)";
+      setMode(b.dataset.mode);
       // the controls ARE the view: switching mode reshapes the wall right now
       batchHistory.length = 0;
       renderBack();
@@ -1590,22 +1792,30 @@ function bindControls() {
   const demoSeed = params.get("demo");
   if (params.get("panel") === "profile") openProfile();
 
-  if (demoSeed) {
+  // ?mode=circling / ?label=Ninja Tune — deep-links a view, and gives the
+  // screenshot harness a way to reach every one of them
+  const wanted = params.get("mode");
+  if (wanted && $(`#modes button[data-mode="${wanted}"]`)) setMode(wanted);
+  const label = params.get("label");
+
+  if (label) {
+    runLabel(label);
+  } else if (demoSeed) {
+    if (!wanted) setMode("new"); // a demo link means "dig this", not "my crate"
     $("#seed").value = demoSeed;
     if (params.get("autodig")) runDig(false);
+  } else if (wanted && params.get("autodig")) {
+    runDig(false);
   } else if (store.spotify.tokens) {
-    // connected: keep the profile + lanes fresh, then open straight into a dig
-    const digIfIdle = () => { if (!batch.length && !digging && store.profile.count) runDig(false); };
+    // connected: open into your own crate and freshen it behind the view.
+    // Only an incremental top-up — a full rescan is the user's button to press.
+    const land = () => { if (!digging) showLibrary($("#seed").value.trim()); };
+    land();
     const needScan = Date.now() - (store.profile.builtAt || 0) > 24 * 3600 * 1000;
-    if (!PREVIEW && needScan) {
-      scanLibrary(false).then(digIfIdle);
-    } else if (!store.profile.lanes) {
-      scanTopAndLanes(!PREVIEW).then(digIfIdle);
-    } else {
-      digIfIdle();
-    }
+    if (!PREVIEW && needScan && store.profile.library.length) scanLibrary(false).then(land);
   } else if (!store.profile.count) {
-    // fresh crate: open into music, not a form
+    // fresh crate, nobody connected: open into music, not a form
+    setMode("new");
     const STARTERS = [
       "Radiohead", "J Dilla", "Aphex Twin", "Portishead", "Fela Kuti",
       "Cocteau Twins", "Boards of Canada", "Miles Davis", "Talking Heads",

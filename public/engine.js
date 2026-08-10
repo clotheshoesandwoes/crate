@@ -372,7 +372,9 @@ export async function digCircling(api, opts) {
     if (!center) continue;
     const siblings = (await relatedArtists(api, center.id, 25))
       .filter((r) => isKnownArtist(artistKey(r.name)) >= 1);
-    if (siblings.length >= 2) anchorArtists = [center, ...siblings.slice(0, 7)];
+    // the view shows one row per artist, so the ring's width IS the result —
+    // more anchors means more strangers standing between more of them
+    if (siblings.length >= 2) anchorArtists = [center, ...siblings.slice(0, 11)];
   }
   if (anchorArtists.length < 4) {
     for (const name of libraryArtists.slice(0, 10)) {
@@ -418,13 +420,21 @@ export async function digCircling(api, opts) {
     const names = [...c.orbits];
     const via = `circling · next to ${names.slice(0, 3).join(", ")}` +
       (names.length > 3 ? ` +${names.length - 3}` : "");
-    try { found.push(...(await midCatalogTracks(api, c.artist, via, obscurity, 3))); } catch {}
+    try {
+      const got = await midCatalogTracks(api, c.artist, via, obscurity, 3);
+      // how many of your own artists this one stands between: the number the
+      // whole mode is built on, so it travels with the track
+      for (const t of got) { t.orbits = c.orbits.size; t.orbitNames = names; }
+      found.push(...got);
+    } catch {}
   }
   // a track from a stranger's catalog can still be credited to a collaborator
   // you already own — and "you never saved them" is the whole promise here
   const theirs = found.filter((t) => t && isKnownArtist(artistKey(t.artist)) < 1);
   return {
-    tracks: finalize(theirs, { hasTrack, isSeen, obscurity, batchSize, maxPerArtist: 2, maxPerAlbum: 1 }),
+    // one per artist: the find is a name you keep missing, not a track
+    tracks: finalize(theirs, { hasTrack, isSeen, obscurity, batchSize, maxPerArtist: 1, maxPerAlbum: 1 })
+      .sort((a, b) => (b.orbits || 0) - (a.orbits || 0)),
     seeds: anchors,
     orbits: chosen.map((c) => `${c.artist.name} (${c.orbits.size})`),
   };
@@ -667,9 +677,13 @@ export async function digBridge(api, opts) {
   const found = [];
   for (let i = 0; i < pathArtists.length; i++) {
     try {
-      found.push(...(await midCatalogTracks(
+      const got = await midCatalogTracks(
         api, pathArtists[i],
-        `bridge ${i + 1}/${pathArtists.length}: ${label}`, obscurity, per)));
+        `bridge ${i + 1}/${pathArtists.length}: ${label}`, obscurity, per);
+      // the stop this track is standing on — the order is the whole finding,
+      // so the view needs it as a number, not buried in a provenance string
+      for (const t of got) { t.step = i + 1; t.stepOf = pathArtists.length; t.stepName = pathArtists[i].name; }
+      found.push(...got);
     } catch {}
   }
   return {
@@ -710,13 +724,18 @@ export async function digDescent(api, opts) {
   const found = [];
   for (let i = 0; i < chain.length; i++) {
     try {
-      found.push(...(await midCatalogTracks(
-        api, chain[i], `depth ${i} · ${fansLabel(chain[i])}`, obscurity, 2)));
+      const got = await midCatalogTracks(
+        api, chain[i], `depth ${i} · ${fansLabel(chain[i])}`, obscurity, 2);
+      // the descent is the subject: the view puts these falling numbers in a
+      // column so you can watch the rooms get smaller
+      for (const t of got) { t.step = i; t.fans = chain[i].nb_fan || 0; t.stepName = chain[i].name; }
+      found.push(...got);
     } catch {}
   }
   return {
     tracks: orderedFilter(found, hasTrack, isSeen, batchSize),
     seeds: [chain[0].name],
     path: chain.map((a) => a.name),
+    chain: chain.map((a) => ({ name: a.name, fans: a.nb_fan || 0 })),
   };
 }

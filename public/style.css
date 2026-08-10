@@ -481,6 +481,88 @@ button.quiet:hover { color: var(--fg); text-decoration-color: var(--fg); }
   background: var(--fg);
 }
 
+/* your own songs: not finds but starting points, so the whole sleeve is the
+   button and there is nothing to save or ban — you already own it */
+.tile.mine { cursor: pointer; }
+.tile.mine:hover img { outline: 2px solid var(--fg); outline-offset: -2px; }
+
+/* ---------- the list views ---------- */
+/* A wall is right when nothing about a track matters more than the sleeve.
+   It is wrong for a bridge, a descent, a ring, a shelf or a set — there the
+   finding is an order or a number, and it has to be readable as one. Same
+   parts as a tile, arranged as a line, with the number given the left edge. */
+#grid.aslist {
+  display: block;
+  max-width: 720px;
+  padding: 20px 30px 60px;
+}
+
+.listhead {
+  font-size: 13px;
+  color: var(--mut);
+  padding-bottom: 10px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+#grid.blind .listhead { visibility: hidden; } /* a bridge head names the finds */
+
+.list { list-style: none; margin: 0; padding: 0; }
+
+.tile.row {
+  display: grid;
+  grid-template-columns: 3.4em 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.tile.row:last-child { border-bottom: 0; }
+
+/* the column that carries the meaning: step, orbit count, fans left in the
+   room. Tabular figures so they stack into a readable line down the page. */
+.tile.row .lead {
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--mut);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.tile.row .art { width: 44px; }
+.tile.row img { width: 44px; height: 44px; aspect-ratio: auto; }
+.tile.row.playing img { outline: 2px solid var(--fg); outline-offset: -2px; }
+.tile.row .meta { padding: 0; }
+.tile.row .n {
+  font-size: 11.5px;
+  color: var(--mut);
+  margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* actions keep their place in the line so nothing shifts when they appear */
+.tile.row .acts {
+  position: static;
+  display: flex;
+  opacity: 0;
+}
+.tile.row:hover .acts,
+.tile.row:has(.love.done) .acts { opacity: 1; }
+
+.tile.row .prog {
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  height: 1px;
+}
+
+@media (max-width: 560px) {
+  #grid.aslist { padding: 16px 18px 60px; }
+  .tile.row { grid-template-columns: 2.8em 40px minmax(0, 1fr); gap: 11px; }
+  .tile.row img { width: 40px; height: 40px; }
+  .tile.row .art { width: 40px; }
+  .tile.row .acts { grid-column: 2 / -1; opacity: 1; margin-top: 2px; }
+}
+
 /* ---------- now bar ---------- */
 #nowbar[hidden] { display: none; }
 #nowbar {

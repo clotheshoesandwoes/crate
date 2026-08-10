@@ -112,6 +112,12 @@ try {
   check("circling: never your own artists", rCirc.tracks.every((t) => !libSet.has(t.artist.toLowerCase())));
   check("circling: found multi-orbit strangers", rCirc.orbits.length >= 3, rCirc.orbits.slice(0, 4).join(", "));
   check("circling: provenance names the orbits", rCirc.tracks.every((t) => t.via.startsWith("circling")), rCirc.tracks[0]?.via);
+  // the ring view leads with the orbit count and ranks by it
+  check("circling: every find carries its orbit count",
+    rCirc.tracks.every((t) => t.orbits >= 2 && t.orbitNames?.length === t.orbits));
+  check("circling: strongest orbit first",
+    rCirc.tracks.every((t, i, a) => i === 0 || a[i - 1].orbits >= t.orbits),
+    rCirc.tracks.map((t) => t.orbits).join(","));
 
   // the label shelf — "who else is on it", so the artist you came from is out
   const mv = await api.dz("search/album?q=madvillainy&limit=1");
@@ -158,11 +164,22 @@ try {
   check("bridge: tracks", rBr.tracks.length >= 8, `${rBr.tracks.length} tracks`);
   check("bridge: found a path", rBr.path.length >= 3, rBr.path.join(" > "));
   check("bridge: provenance", rBr.tracks.every((t) => t.via));
+  // the list view sets the stop number in its own column, so it must be there
+  check("bridge: every track knows its stop",
+    rBr.tracks.every((t) => t.step >= 1 && t.step <= rBr.path.length && t.stepName),
+    `steps ${rBr.tracks.map((t) => t.step).join(",")}`);
+  check("bridge: stops run in order",
+    rBr.tracks.every((t, i, a) => i === 0 || a[i - 1].step <= t.step));
 
   // pathway: rabbit hole descends in fan count
   const rHo = await digDescent(api, { seed: "Radiohead", obscurity: 0.6, batchSize: 30, ...base });
   check("hole: tracks", rHo.tracks.length >= 8, `${rHo.tracks.length} tracks`);
   check("hole: goes somewhere", rHo.path.length >= 4, `${rHo.path.length} stops: ${rHo.path.slice(0, 5).join(" > ")}…`);
+  // the descent is only legible if the numbers actually fall
+  check("hole: every track carries its room size", rHo.tracks.every((t) => t.fans > 0));
+  check("hole: the rooms get smaller",
+    rHo.chain.every((c, i, a) => i === 0 || a[i - 1].fans >= c.fans),
+    rHo.chain.map((c) => c.fans).join(" > "));
 
   // engine, mode: deep (known artists only)
   const known = { boardsofcanada: 10, autechre: 6, "aphex twin": 8 };
