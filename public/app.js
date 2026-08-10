@@ -485,27 +485,13 @@ function landWall(tracks) {
   renderTracks(tracks, 0);
 }
 
-function randomLane() {
-  const lanes = store.profile.lanes;
-  if (!lanes) return null;
-  const entries = Object.entries(lanes)
-    .map(([name, artists]) => [name, Object.values(artists).reduce((a, b) => a + b, 0)]);
-  if (!entries.length) return null;
-  const total = entries.reduce((s, [, w]) => s + w, 0);
-  let r = Math.random() * total;
-  for (const [name, w] of entries) {
-    r -= w;
-    if (r <= 0) return name;
-  }
-  return entries[0][0];
-}
-
 async function runCircling() {
   if (digging) return;
   // a wide sample of candidate centres; the engine only resolves the few it
-  // needs to find a dense corner, so a big list costs nothing
-  const lane = activeLane || randomLane();
-  const anchors = sampleLibrary(40, lane);
+  // needs to find a dense corner, so a big list costs nothing. It clusters the
+  // anchors off the similarity graph, so this needs no genre grouping — which
+  // is just as well, since Spotify no longer returns any.
+  const anchors = sampleLibrary(40, activeLane);
   if (anchors.length < 3) {
     status("circling reads your library — connect spotify in settings first");
     openSettings();
@@ -535,7 +521,7 @@ async function runCircling() {
 }
 
 // flip the record over: the rest of the label's shelf
-async function runLabel(label, skipAlbumId) {
+async function runLabel(label, skipAlbumId, skipArtistId) {
   if (digging || !label) return;
   digging = true;
   $("#dig").disabled = true;
@@ -545,15 +531,18 @@ async function runLabel(label, skipAlbumId) {
     const res = await digLabel(api, {
       label,
       skipAlbumId,
+      skipArtistId,
       obscurity: sliderVal("obscurity"),
       batchSize: 40,
       log: status,
       ...digCallbacks(),
     });
     landWall(res.tracks);
+    // major-label strings ("Alamo/Columbia") are barely a shelf; the imprints
+    // are where this pays off, so say plainly which one you just opened
     status(res.tracks.length
-      ? `${res.tracks.length} more from ${res.label}${res.shelfSize ? ` · ${res.shelfSize} records on that shelf` : ""}`
-      : `nothing new on ${label} right now`);
+      ? `${res.tracks.length} others on ${res.label}${res.acts ? ` · ${res.acts} acts on that shelf` : ""}`
+      : `${res.label} is a dead end — no one else on that shelf. Try an indie imprint.`);
   } catch (e) {
     $("#grid .digging")?.remove();
     status("label dig failed — " + (e.message || e));
@@ -802,8 +791,8 @@ function renderPanelArtist(data) {
     c.append(el("div", "psub", [release.title, release.year, release.label].filter(Boolean).join(" · ")));
     if (release.label) {
       const acts = el("div", "pacts");
-      const b = el("button", "", `more on ${release.label}`);
-      b.addEventListener("click", () => runLabel(release.label, release.id));
+      const b = el("button", "", `who else is on ${release.label}`);
+      b.addEventListener("click", () => runLabel(release.label, release.id, artist.id));
       acts.append(b);
       c.append(acts);
     }
@@ -1044,6 +1033,10 @@ function renderTracks(tracks, startIdx) {
     img.addEventListener("click", () => {
       if (currentIdx === idx && !audio.paused) { pauseAudio(); return; }
       playIdx(idx);
+      // blindfolded, that page would name the artist, the album and the label
+      // before you had an opinion. The reveal is the point, so it waits for
+      // the ♥ or the ✕.
+      if (blindOn() && !revealed.has(t.key)) return;
       openPanel(idx);
     });
     img.addEventListener("mouseenter", () => {

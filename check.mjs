@@ -113,14 +113,23 @@ try {
   check("circling: found multi-orbit strangers", rCirc.orbits.length >= 3, rCirc.orbits.slice(0, 4).join(", "));
   check("circling: provenance names the orbits", rCirc.tracks.every((t) => t.via.startsWith("circling")), rCirc.tracks[0]?.via);
 
-  // the label shelf
-  const rLab = await digLabel(api, { ...base, label: "Stones Throw Records", obscurity: 0.5, batchSize: 25 });
-  check("label: tracks", rLab.tracks.length >= 8, `${rLab.tracks.length} from ${rLab.label} · shelf ${rLab.shelfSize}`);
+  // the label shelf — "who else is on it", so the artist you came from is out
+  const mv = await api.dz("search/album?q=madvillainy&limit=1");
+  const mvArtist = mv.data[0].artist;
+  const rLab = await digLabel(api, {
+    ...base, label: "Stones Throw Records", obscurity: 0.5, batchSize: 25,
+    skipArtistId: mvArtist.id,
+  });
+  check("label: tracks", rLab.tracks.length >= 8, `${rLab.tracks.length} from ${rLab.label} · ${rLab.acts} acts`);
   check("label: provenance", rLab.tracks.every((t) => t.via.includes("the label")));
+  check("label: excludes the artist you came from",
+    rLab.tracks.every((t) => String(t.artistDzId) !== String(mvArtist.id)), `not ${mvArtist.name}`);
+  check("label: one track per act",
+    new Set(rLab.tracks.map((t) => t.artist.toLowerCase())).size === rLab.tracks.length);
   console.log("     shelf sample:", rLab.tracks.slice(0, 4).map((t) => `${t.artist} — ${t.title}`).join(" | "));
 
   // panel carries the record's label (that's what makes the shelf dig possible)
-  const albumHit = await api.dz("search/album?q=madvillainy&limit=1");
+  const albumHit = mv;
   const panLab = await songPanel(api, { ...base, artist: "Madvillain", title: "Accordion", albumId: albumHit.data[0].id });
   check("panel: reads the label off the record", !!panLab?.release?.label,
     `${panLab?.release?.title} · ${panLab?.release?.year} · ${panLab?.release?.label}`);

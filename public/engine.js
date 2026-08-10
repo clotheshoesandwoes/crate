@@ -420,24 +420,32 @@ export async function digCircling(api, opts) {
       (names.length > 3 ? ` +${names.length - 3}` : "");
     try { found.push(...(await midCatalogTracks(api, c.artist, via, obscurity, 3))); } catch {}
   }
+  // a track from a stranger's catalog can still be credited to a collaborator
+  // you already own — and "you never saved them" is the whole promise here
+  const theirs = found.filter((t) => t && isKnownArtist(artistKey(t.artist)) < 1);
   return {
-    tracks: finalize(found, { hasTrack, isSeen, obscurity, batchSize, maxPerArtist: 2, maxPerAlbum: 1 }),
+    tracks: finalize(theirs, { hasTrack, isSeen, obscurity, batchSize, maxPerArtist: 2, maxPerAlbum: 1 }),
     seeds: anchors,
     orbits: chosen.map((c) => `${c.artist.name} (${c.orbits.size})`),
   };
 }
 
-// Flip the record over: everything else that came out on this label.
+// Flip the record over: everything else that came out on this label — which
+// means the label's OTHER acts. The artist you are already looking at is one
+// panel away from their whole catalog, so they are not the find here.
 export async function digLabel(api, opts) {
   const {
-    label, skipAlbumId = null, obscurity = 0.5,
+    label, skipAlbumId = null, skipArtistId = null, obscurity = 0.5,
     hasTrack = () => false, isSeen = () => false, batchSize = 40, log = () => {},
   } = opts;
   if (!label) return { tracks: [], label: "" };
   log(`pulling the ${label} shelf…`);
   const j = await api.dz(`search/album?q=${encodeURIComponent(`label:"${label}"`)}&limit=100`);
-  const albums = (j?.data || []).filter((al) => String(al.id) !== String(skipAlbumId));
-  if (!albums.length) return { tracks: [], label };
+  const sameArtist = (id) => skipArtistId && String(id) === String(skipArtistId);
+  const albums = (j?.data || []).filter(
+    (al) => String(al.id) !== String(skipAlbumId) && !sameArtist(al.artist?.id));
+  const acts = new Set(albums.map((al) => al.artist?.id).filter(Boolean)).size;
+  if (!albums.length) return { tracks: [], label, shelfSize: j?.total || 0, acts: 0 };
 
   const picks = pickWeighted(albums, () => jitter(), Math.min(14, albums.length));
   const found = [];
@@ -449,16 +457,20 @@ export async function digLabel(api, opts) {
       const year = yearOf(full?.release_date || al.release_date);
       const art = full?.cover_big || al.cover_big || al.cover_medium;
       for (const t of pickWeighted(tracks, () => jitter(), 2)) {
-        found.push(fromDeezerTrack(t, al.artist, {
+        const tr = fromDeezerTrack(t, al.artist, {
           album: full?.title || al.title, albumId: al.id, year, art, via: `${label} · the label`,
-        }));
+        });
+        // a compilation or a guest spot can still credit the artist you came from
+        if (tr && !sameArtist(tr.artistDzId)) found.push(tr);
       }
     } catch {}
   }
   return {
-    tracks: finalize(found, { hasTrack, isSeen, obscurity, batchSize, maxPerArtist: 2, maxPerAlbum: 1 }),
+    // one per act: a shelf is worth digging because of how many names are on it
+    tracks: finalize(found, { hasTrack, isSeen, obscurity, batchSize, maxPerArtist: 1, maxPerAlbum: 1 }),
     label,
     shelfSize: j?.total || albums.length,
+    acts,
   };
 }
 
